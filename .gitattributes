@@ -1,0 +1,24 @@
+# Normalise line endings so the repo is identical on Linux, macOS and Windows.
+# Without this, a Windows checkout rewrites every file to CRLF and the Docker
+# builds break on shell scripts.
+* text=auto eol=lf
+
+# Shell scripts and Dockerfiles MUST be LF: CRLF breaks the shebang inside a
+# Linux container with a confusing "no such file or directory".
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.Dockerfile text eol=lf
+Makefile    text eol=lf
+
+# Binary: never touch.
+*.joblib    binary
+*.pkl       binary
+*.db        binary
+*.png       binary
+*.jpg       binary
+*.gz        binary
+*.zip       binary
+
+# Collapse generated/vendored files in diffs and exclude them from language stats.
+*.json      linguist-language=JSON
+monitoring/grafana/dashboards/*.json linguist-generated=true

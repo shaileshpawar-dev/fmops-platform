@@ -1,0 +1,86 @@
+# Staging profile: AWS-backed, but with permissive gates so releases can be
+# exercised end-to-end before they are held to production thresholds.
+environment: staging
+log_level: INFO
+log_format: json
+
+validation:
+  engine: native
+  min_rows: 1000
+  fail_on_warning: false
+
+training:
+  algorithm: hist_gradient_boosting
+  cv_folds: 3
+
+tuning:
+  enabled: true
+  backend: local_random
+  max_trials: 12
+
+approval:
+  enabled: true
+  min_f1: 0.62
+  min_roc_auc: 0.72
+  max_inference_latency_ms: 200.0
+  min_improvement: 0.005
+  require_manual_approval: false
+
+deployment:
+  provider: sagemaker
+  strategy: canary
+  endpoint_name: fmops-loan-default-staging
+  canary_steps: [25, 50, 100]
+  canary_step_seconds: 30
+  auto_rollback: true
+  instance_type: ml.m5.large
+  instance_count: 1
+
+drift:
+  enabled: true
+  threshold: 0.20
+  min_samples: 500
+
+monitoring:
+  metrics_enabled: true
+  cloudwatch_enabled: true
+  cloudwatch_namespace: FMOps/Staging
+  latency_slo_ms: 200.0
+  error_rate_slo: 0.02
+
+alerts:
+  enabled: true
+  sinks: [log, database, sns]
+
+retraining:
+  enabled: true
+  triggers: [drift, performance, schedule, manual]
+  auto_deploy_if_better: true
+  cooldown_minutes: 60
+
+llm:
+  provider: bedrock
+  model: anthropic.claude-3-5-haiku-20241022-v1:0
+  safety_enabled: true
+  daily_cost_budget_usd: 10.0
+
+aws:
+  enabled: true
+  region: us-east-1
+  s3_prefix: fmops/staging
+
+tracking:
+  backend: mlflow
+  registry_backend: mlflow
+  experiment_name: fmops-loan-default-staging
+
+security:
+  auth_backend: api_key
+  require_auth_for_writes: true
+  audit_log_enabled: true
+  cors_allow_origins: ["https://staging.internal.example"]
+
+server:
+  port: 8000
+  workers: 2
+  docs_enabled: true

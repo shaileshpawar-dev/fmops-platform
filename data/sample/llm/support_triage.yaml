@@ -1,0 +1,100 @@
+name: support_triage
+description: >
+  Support-ticket triage evaluation set. Each case supplies a ticket and the
+  facts a correct summary must contain. Forbidden keywords catch the specific
+  hallucination this prompt family is prone to -- inventing order numbers,
+  refund amounts and dates that were never in the ticket.
+prompt_name: support_summarizer
+cases:
+  - id: billing_duplicate_charge
+    input:
+      ticket_text: >
+        I was charged twice for my subscription this month. I only have one
+        account and I did not sign up a second time. Please refund the duplicate
+        charge. This is the second time this has happened.
+    reference: >
+      The customer was charged twice for one subscription and is requesting a
+      refund for the duplicate charge. They report this has happened before.
+    context: >
+      I was charged twice for my subscription this month. I only have one
+      account and I did not sign up a second time. Please refund the duplicate
+      charge. This is the second time this has happened.
+    expected_keywords: [charge, refund, subscription]
+    forbidden_keywords: ["order #", "$49", "January 3"]
+    tags: [billing, max_sentences:4]
+
+  - id: access_locked_out
+    input:
+      ticket_text: >
+        I cannot log in. Password reset emails never arrive. I have checked spam.
+        I need access today because I have a client presentation.
+    reference: >
+      The customer cannot log in and is not receiving password reset emails,
+      having already checked spam. They need urgent access for a client
+      presentation.
+    context: >
+      I cannot log in. Password reset emails never arrive. I have checked spam.
+      I need access today because I have a client presentation.
+    expected_keywords: [log in, password, reset]
+    forbidden_keywords: ["two-factor", "account suspended", "2019"]
+    tags: [account_access, max_sentences:4]
+
+  - id: technical_export_failure
+    input:
+      ticket_text: >
+        Exporting a report to CSV fails with "processing error" after about
+        thirty seconds. It worked last week. The report has roughly 40000 rows.
+    reference: >
+      CSV export of a roughly 40000-row report fails with a processing error
+      after about thirty seconds, having worked the previous week.
+    context: >
+      Exporting a report to CSV fails with "processing error" after about
+      thirty seconds. It worked last week. The report has roughly 40000 rows.
+    expected_keywords: [export, csv, error]
+    forbidden_keywords: ["500", "timeout of 60", "database corruption"]
+    tags: [technical_issue, max_sentences:4]
+
+  - id: cancellation_price_increase
+    input:
+      ticket_text: >
+        I want to cancel my plan. The price went up and I do not use the product
+        enough to justify it. Please confirm there will be no further billing.
+    reference: >
+      The customer wants to cancel because of a price increase and low usage,
+      and wants confirmation that billing will stop.
+    context: >
+      I want to cancel my plan. The price went up and I do not use the product
+      enough to justify it. Please confirm there will be no further billing.
+    expected_keywords: [cancel, billing]
+    forbidden_keywords: ["30-day notice", "$120", "contract expires"]
+    tags: [cancellation, max_sentences:4]
+
+  - id: feature_request_sso
+    input:
+      ticket_text: >
+        Our security team requires SAML single sign-on before we can roll this
+        out company wide. Is that on the roadmap? We have about 300 seats
+        waiting on it.
+    reference: >
+      The customer needs SAML single sign-on before a company-wide rollout of
+      about 300 seats and is asking whether it is on the roadmap.
+    context: >
+      Our security team requires SAML single sign-on before we can roll this
+      out company wide. Is that on the roadmap? We have about 300 seats
+      waiting on it.
+    expected_keywords: [sso, roadmap]
+    forbidden_keywords: ["Q3", "already available", "next release"]
+    tags: [feature_request, max_sentences:4]
+
+  - id: vague_complaint
+    input:
+      ticket_text: >
+        This is not working properly. Please fix it.
+    reference: >
+      The customer reports the product is not working but has not provided any
+      specifics. More information is needed.
+    context: >
+      This is not working properly. Please fix it.
+    expected_keywords: []
+    forbidden_keywords: ["login", "billing", "export", "crash"]
+    tags: [ambiguous, max_sentences:3]

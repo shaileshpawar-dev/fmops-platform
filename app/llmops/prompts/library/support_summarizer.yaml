@@ -1,0 +1,61 @@
+name: support_summarizer
+description: >
+  Summarise a customer support ticket into a short triage record. Used as the
+  reference prompt for the LLMOps demo: v1.0.0 is the naive baseline, v1.1.0
+  adds structure and grounding constraints, v2.0.0 switches to strict JSON.
+versions:
+  - version: "1.0.0"
+    description: Naive baseline. No output contract, no grounding constraint.
+    system: You are a helpful customer support assistant.
+    template: |
+      Summarise this support ticket.
+
+      Ticket: {ticket_text}
+    variables: [ticket_text]
+    temperature: 0.0
+    tags: [baseline]
+
+  - version: "1.1.0"
+    description: >
+      Adds an explicit output contract, a length bound, and an instruction not
+      to introduce facts absent from the ticket (the faithfulness constraint the
+      evaluation suite scores).
+    system: >
+      You are a customer support triage assistant. Summarise tickets accurately
+      and never state anything that is not present in the ticket text. If a
+      detail is not stated, say "not specified" rather than guessing.
+    template: |
+      Summarise the following support ticket in at most three sentences, then
+      state the sentiment and the priority.
+
+      Only use information contained in the ticket. Do not invent order numbers,
+      dates, names, or amounts.
+
+      Ticket: {ticket_text}
+    variables: [ticket_text]
+    temperature: 0.0
+    tags: [grounded, recommended]
+
+  - version: "2.0.0"
+    description: >
+      Strict JSON output for downstream automation. Breaking change: consumers
+      that parsed prose must be updated, hence the major version bump.
+    system: >
+      You are a customer support triage assistant. You output only valid JSON,
+      with no markdown fences and no commentary. Never invent details that are
+      not in the ticket; use null for anything not stated.
+    template: |
+      Extract a triage record from the support ticket below as JSON with the
+      fields: category, sentiment, priority, summary, requires_human.
+
+      - category: one of billing, technical_issue, account_access,
+        feature_request, cancellation
+      - sentiment: one of positive, neutral, negative
+      - priority: one of low, medium, high, urgent
+      - summary: at most two sentences, using only facts from the ticket
+      - requires_human: boolean
+
+      Ticket: {ticket_text}
+    variables: [ticket_text]
+    temperature: 0.0
+    tags: [json, structured]

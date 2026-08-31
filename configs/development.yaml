@@ -1,0 +1,88 @@
+# Local development profile.
+# AWS is disabled; everything runs on the filesystem + SQLite + local MLflow.
+environment: development
+log_level: INFO
+log_format: console
+
+paths:
+  artifacts_dir: artifacts
+
+data:
+  train_rows: 8000
+  random_seed: 42
+
+validation:
+  engine: native
+  min_rows: 500
+  max_missing_fraction: 0.05
+  max_duplicate_fraction: 0.01
+  fail_on_warning: false
+
+training:
+  algorithm: hist_gradient_boosting
+  cv_folds: 3
+
+tuning:
+  enabled: true
+  backend: local_random
+  max_trials: 8
+  metric: roc_auc
+
+approval:
+  enabled: true
+  min_f1: 0.60
+  min_roc_auc: 0.70
+  max_inference_latency_ms: 250.0
+  min_improvement: 0.005
+  require_manual_approval: false
+
+deployment:
+  provider: local
+  strategy: blue_green
+  endpoint_name: fmops-loan-default
+  auto_rollback: true
+
+drift:
+  enabled: true
+  engine: native
+  threshold: 0.20
+  min_samples: 200
+  dataset_drift_share: 0.30
+
+monitoring:
+  metrics_enabled: true
+  cloudwatch_enabled: false
+  latency_slo_ms: 250.0
+
+alerts:
+  enabled: true
+  sinks: [log, database]
+
+retraining:
+  enabled: true
+  triggers: [drift, performance, manual]
+  auto_deploy_if_better: true
+  cooldown_minutes: 0
+
+llm:
+  provider: mock
+  model: mock-small
+  safety_enabled: true
+
+aws:
+  enabled: false
+  region: us-east-1
+
+tracking:
+  backend: mlflow
+  registry_backend: local
+  experiment_name: fmops-loan-default
+
+security:
+  auth_backend: none
+  audit_log_enabled: true
+  cors_allow_origins: ["*"]
+
+server:
+  port: 8000
+  docs_enabled: true

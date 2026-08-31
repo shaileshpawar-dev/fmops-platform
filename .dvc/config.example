@@ -1,0 +1,15 @@
+# Example DVC remote. Copy to .dvc/config (or run the commands below) to push
+# dataset payloads to S3 while the .dvc pointer files stay in git.
+#
+#   dvc remote add -d s3remote s3://my-fmops-artifacts/dvc
+#   dvc remote modify s3remote region us-east-1
+#   dvc push
+#
+# The bucket created by terraform works directly:
+#   dvc remote add -d s3remote "s3://$(cd terraform && terraform output -raw artifact_bucket)/dvc"
+
+[core]
+    remote = s3remote
+['remote "s3remote"']
+    url = s3://REPLACE-ME-fmops-artifacts/dvc
+    region = us-east-1

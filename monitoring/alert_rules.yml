@@ -1,0 +1,192 @@
+# Prometheus alerting rules.
+#
+# These mirror the SLOs and gates the platform enforces internally, so the same
+# condition is visible in Grafana and can page through Alertmanager.
+#
+# Thresholds here are the development defaults; keep them in sync with
+# configs/<env>.yaml (monitoring.latency_slo_ms, monitoring.error_rate_slo,
+# drift.threshold, llm.daily_cost_budget_usd).
+
+groups:
+  - name: fmops_serving
+    interval: 30s
+    rules:
+      - alert: FMOpsHighErrorRate
+        expr: |
+          sum(rate(fmops_predictions_total{outcome!="success"}[5m]))
+            /
+          clamp_min(sum(rate(fmops_predictions_total[5m])), 0.001)
+            > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          component: inference
+        annotations:
+          summary: "Prediction error rate above the 2% SLO"
+          description: >
+            {{ $value | humanizePercentage }} of predictions are failing over the
+            last 5 minutes. Check /api/v1/monitoring/service and the API logs.
+
+      - alert: FMOpsHighLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(fmops_prediction_latency_seconds_bucket[5m])) by (le, model_version)
+          ) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          component: inference
+        annotations:
+          summary: "p95 prediction latency above the 250ms SLO"
+          description: >
+            Model version {{ $labels.model_version }} p95 latency is
+            {{ $value }}s. A recent deployment or a cold cache is the usual cause.
+
+      - alert: FMOpsNoTraffic
+        expr: sum(rate(fmops_predictions_total[15m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+          component: inference
+        annotations:
+          summary: "The endpoint has served no predictions for 15 minutes"
+          description: >
+            This is expected on an idle development stack, but in production it
+            usually means the endpoint is unrouted or upstream traffic stopped.
+
+  - name: fmops_model_quality
+    interval: 60s
+    rules:
+      - alert: FMOpsDriftDetected
+        expr: max(fmops_drift_detected) by (model_name) == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Data drift detected on {{ $labels.model_name }}"
+          description: >
+            The most recent drift scan exceeded its threshold. The retraining
+            trigger will fire on its next evaluation unless suppressed by the
+            cooldown. See GET /api/v1/drift/latest.
+
+      - alert: FMOpsSevereDrift
+        expr: max(fmops_drift_score{drift_type="data"}) by (model_name) > 0.4
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Severe data drift on {{ $labels.model_name }}"
+          description: >
+            Dataset drift score is {{ $value }}, more than double the configured
+            threshold. Predictions should be treated as unreliable until the
+            model is retrained.
+
+      - alert: FMOpsLiveQualityDegraded
+        expr: |
+          fmops_live_model_metric{metric="roc_auc"} > 0
+          and
+          fmops_live_model_metric{metric="roc_auc"} < 0.70
+        for: 30m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Live ROC-AUC below 0.70 on labelled production traffic"
+          description: >
+            Measured from ground-truth labels, not estimated. Value {{ $value }}.
+            This fires the performance retraining trigger.
+
+  - name: fmops_deployment
+    interval: 30s
+    rules:
+      - alert: FMOpsDeploymentRolledBack
+        expr: increase(fmops_rollbacks_total[10m]) > 0
+        labels:
+          severity: critical
+          component: deployment
+        annotations:
+          summary: "A rollback occurred on {{ $labels.endpoint }}"
+          description: >
+            Reason: {{ $labels.reason }}. The previous model version is serving
+            again. Investigate before redeploying.
+
+      - alert: FMOpsDeploymentFailed
+        expr: max(fmops_deployment_state{state="failed"}) by (endpoint) == 1
+        for: 2m
+        labels:
+          severity: critical
+          component: deployment
+        annotations:
+          summary: "Deployment on {{ $labels.endpoint }} is in the failed state"
+
+  - name: fmops_llmops
+    interval: 60s
+    rules:
+      - alert: FMOpsLLMCostBudget
+        expr: increase(fmops_llm_cost_usd_total[24h]) > 25
+        labels:
+          severity: warning
+          component: llmops
+        annotations:
+          summary: "LLM spend exceeded the daily budget"
+          description: >
+            Estimated spend over 24h is ${{ $value }} against a $25 budget.
+            Figures are derived from token counts and the configured price
+            table; they are estimates, not billing truth.
+
+      - alert: FMOpsLLMErrorRate
+        expr: |
+          sum(rate(fmops_llm_requests_total{outcome="error"}[10m]))
+            /
+          clamp_min(sum(rate(fmops_llm_requests_total[10m])), 0.001)
+            > 0.10
+        for: 10m
+        labels:
+          severity: critical
+          component: llmops
+        annotations:
+          summary: "More than 10% of LLM calls are failing"
+          description: >
+            Usually a provider outage, an expired credential, or rate limiting.
+            Check GET /api/v1/llm/providers.
+
+      - alert: FMOpsSafetyFindingsSpike
+        expr: increase(fmops_llm_safety_findings_total{severity="high"}[1h]) > 10
+        labels:
+          severity: warning
+          component: llmops
+        annotations:
+          summary: "Spike in high-severity safety findings"
+          description: >
+            More than 10 high-severity findings in an hour, which may indicate a
+            probing campaign. Note the screen is heuristic and both over- and
+            under-reports; review the traces rather than trusting the count.
+
+  - name: fmops_resources
+    interval: 30s
+    rules:
+      - alert: FMOpsHighMemory
+        expr: fmops_system_memory_percent > 90
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Host memory above 90%"
+
+      - alert: FMOpsProcessMemoryGrowth
+        expr: |
+          fmops_process_memory_mb
+          - avg_over_time(fmops_process_memory_mb[1h] offset 1h) > 500
+        for: 30m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Process RSS grew by more than 500MB in an hour"
+          description: >
+            The model cache is LRU-bounded, so sustained growth suggests a leak
+            or an unbounded in-memory accumulation.

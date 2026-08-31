@@ -1,0 +1,14 @@
+# Grafana datasource provisioning: point Grafana at the Prometheus container.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    uid: fmops-prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 10s
+      httpMethod: POST
+    editable: false

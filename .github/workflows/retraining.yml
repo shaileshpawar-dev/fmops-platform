@@ -1,0 +1,244 @@
+name: Scheduled retraining
+
+# Automated retraining.
+#
+# Runs on a schedule and evaluates the triggers. It only trains when a trigger
+# actually fires (drift, measured performance degradation, or new-data volume),
+# so a healthy model costs one cheap check rather than a full retraining run.
+#
+# The important property: this workflow can NOT push a worse model to
+# production. The retraining pipeline compares the candidate against the
+# incumbent and rejects it unless it wins by the configured margin. Exit code 2
+# means exactly that, and is reported as a successful run with a negative
+# outcome -- it must not page anyone.
+
+on:
+  schedule:
+    # 03:00 UTC every Monday. Keep in sync with retraining.schedule_cron.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Retrain even if no trigger fired
+        type: boolean
+        default: false
+      deploy:
+        description: Deploy the candidate if it wins
+        type: boolean
+        default: true
+      environment:
+        description: Environment to evaluate
+        type: choice
+        options: [development, staging, production]
+        default: staging
+
+concurrency:
+  group: retraining-${{ inputs.environment || 'staging' }}
+  cancel-in-progress: false # never interrupt a training run
+
+env:
+  PYTHON_VERSION: "3.12"
+  FMOPS_ENV: ${{ inputs.environment || 'staging' }}
+  FMOPS_LOG_FORMAT: json
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  check-triggers:
+    name: Evaluate retraining triggers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      should_retrain: ${{ steps.evaluate.outputs.should_retrain }}
+      reason: ${{ steps.evaluate.outputs.reason }}
+      aws_configured: ${{ steps.check.outputs.aws_configured }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - id: check
+        run: |
+          if [ -n "${{ vars.AWS_ROLE_ARN }}" ]; then
+            echo "aws_configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "aws_configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[aws]"
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.check.outputs.aws_configured == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: fmops-retrain-check-${{ github.run_id }}
+
+      - id: evaluate
+        name: Would retraining fire?
+        env:
+          FMOPS_AWS__ENABLED: ${{ steps.check.outputs.aws_configured }}
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+        run: |
+          set +e
+          python -m pipelines.retraining_pipeline --check-only \
+            --report artifacts/reports/trigger-check.json \
+            ${{ inputs.force && '--force' || '' }}
+          set -e
+
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, pathlib
+          path = pathlib.Path("artifacts/reports/trigger-check.json")
+          data = json.loads(path.read_text()) if path.is_file() else {}
+          print(f"should_retrain={str(data.get('should_retrain', False)).lower()}")
+          reason = str(data.get("reason", "no report produced")).replace("\n", " ")[:300]
+          print(f"reason={reason}")
+          PY
+
+      - name: Summary
+        run: |
+          {
+            echo "### Retraining trigger check"
+            echo ""
+            echo "- **Would retrain:** ${{ steps.evaluate.outputs.should_retrain }}"
+            echo "- **Reason:** ${{ steps.evaluate.outputs.reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trigger-check
+          path: artifacts/reports/
+          retention-days: 14
+
+  retrain:
+    name: Retrain and compare
+    runs-on: ubuntu-latest
+    needs: check-triggers
+    if: needs.check-triggers.outputs.should_retrain == 'true'
+    timeout-minutes: 90
+    outputs:
+      outcome: ${{ steps.run.outputs.outcome }}
+      status: ${{ steps.run.outputs.status }}
+      message: ${{ steps.run.outputs.message }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[aws]"
+
+      - name: Configure AWS credentials (OIDC)
+        if: needs.check-triggers.outputs.aws_configured == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: fmops-retrain-${{ github.run_id }}
+
+      - id: run
+        name: Run the retraining pipeline
+        env:
+          FMOPS_AWS__ENABLED: ${{ needs.check-triggers.outputs.aws_configured }}
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+          FMOPS_AWS__SAGEMAKER_ROLE_ARN: ${{ vars.SAGEMAKER_ROLE_ARN }}
+        run: |
+          set +e
+          python -m pipelines.retraining_pipeline \
+            --report artifacts/reports/retraining.json \
+            ${{ inputs.force && '--force' || '' }} \
+            ${{ inputs.deploy == false && '--no-deploy' || '' }}
+          code=$?
+          set -e
+          echo "outcome=$code" >> "$GITHUB_OUTPUT"
+
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, pathlib
+          path = pathlib.Path("artifacts/reports/retraining.json")
+          data = json.loads(path.read_text()) if path.is_file() else {}
+          print(f"status={data.get('status', 'unknown')}")
+          print(f"message={str(data.get('message', '')).replace(chr(10), ' ')[:400]}")
+          PY
+
+          # Exit 2 means the gate rejected the candidate. That is the system
+          # working correctly, not a build failure.
+          if [ "$code" = "1" ]; then
+            exit 1
+          fi
+          exit 0
+
+      - name: Summary
+        run: |
+          {
+            echo "### Retraining run"
+            echo ""
+            echo "- **Status:** ${{ steps.run.outputs.status }}"
+            echo "- **Outcome:** ${{ steps.run.outputs.message }}"
+            echo ""
+            if [ "${{ steps.run.outputs.outcome }}" = "2" ]; then
+              echo "> The candidate was **rejected**: it did not beat the production"
+              echo "> model by the configured minimum improvement. Production is"
+              echo "> unchanged. This is the approval gate working as designed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retraining-report
+          path: artifacts/reports/
+          retention-days: 90
+
+  notify:
+    name: Report the outcome
+    runs-on: ubuntu-latest
+    needs: [check-triggers, retrain]
+    if: always() && needs.check-triggers.outputs.should_retrain == 'true'
+    steps:
+      - name: Open an issue when retraining fails
+        if: needs.retrain.result == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Retraining pipeline failed (run ${context.runId})`,
+              labels: ['mlops', 'incident'],
+              body: [
+                '## Scheduled retraining failed',
+                '',
+                `**Trigger:** ${{ needs.check-triggers.outputs.reason }}`,
+                `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                '',
+                'The production model is **unchanged** -- a failed retraining run',
+                'never replaces the serving model.',
+                '',
+                '### Where to look',
+                '- The `retraining-report` artifact on the run',
+                '- `GET /api/v1/retraining` for the event and its recorded decision',
+                '- `GET /api/v1/alerts` for the alert the pipeline raised',
+              ].join('\n')
+            })
+
+      - name: Note a rejected candidate
+        if: needs.retrain.outputs.outcome == '2'
+        run: |
+          echo "::notice::A retraining candidate was trained and rejected: ${{ needs.retrain.outputs.message }}"

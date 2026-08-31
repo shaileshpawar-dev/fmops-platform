@@ -1,0 +1,6 @@
+# Paths DVC should not walk.
+.venv/
+artifacts/
+.pytest_cache/
+.ruff_cache/
+__pycache__/

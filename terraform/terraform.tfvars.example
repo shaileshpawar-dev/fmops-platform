@@ -1,0 +1,42 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored.
+#
+# Nothing secret belongs here either: no access keys, no passwords. AWS
+# credentials come from your normal credential chain (SSO, profile, instance
+# role), and application secrets come from the environment at runtime.
+
+environment = "dev"
+aws_region  = "us-east-1"
+project     = "fmops"
+
+# Leave empty to auto-derive a globally-unique name from your account id.
+artifact_bucket_name = ""
+
+enable_bucket_versioning = true
+artifact_retention_days  = 90
+
+# NEVER set this true in staging or production: it lets `terraform destroy`
+# delete a bucket that still contains model artifacts.
+force_destroy_bucket = false
+
+ecr_repositories          = ["api", "training", "inference"]
+ecr_image_retention_count = 20
+ecr_scan_on_push          = true
+
+enable_sagemaker        = true
+sagemaker_instance_type = "ml.m5.large"
+
+log_retention_days         = 30
+alert_email                = ""          # e.g. "ml-platform-oncall@example.com"
+latency_alarm_threshold_ms = 250
+error_rate_alarm_threshold = 0.02
+drift_alarm_threshold      = 0.2
+
+# Enables the GitHub Actions OIDC role. Format: "owner/repo".
+# Leave empty and no CI role (and no long-lived key) is created at all.
+github_repository = ""
+
+cost_center = "ml-platform"
+
+additional_tags = {
+  Owner = "ml-platform"
+}

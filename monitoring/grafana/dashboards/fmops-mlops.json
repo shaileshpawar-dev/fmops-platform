@@ -1,0 +1,450 @@
+{
+  "uid": "fmops-mlops",
+  "title": "FMOps - MLOps",
+  "description": "Model serving, deployment, drift and system health for the FMOps platform.",
+  "tags": ["fmops", "mlops"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "editable": true,
+  "templating": {
+    "list": [
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+        "query": "label_values(fmops_model_info, model_name)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Serving model",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Live model version",
+      "description": "The version currently receiving 100% (or the majority) of traffic.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "max(fmops_deployment_traffic_percent{model_name=~\"$model\"} > 0) by (model_version)",
+          "legendFormat": "v{{model_version}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "color": { "mode": "fixed", "fixedColor": "blue" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Offline ROC-AUC",
+      "description": "Held-out test ROC-AUC recorded at training time for the serving version.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 4, "y": 1 },
+      "targets": [
+        {
+          "expr": "max(fmops_model_metric{metric=\"roc_auc\", model_name=~\"$model\"})",
+          "legendFormat": "roc_auc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 4,
+          "min": 0.5,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.7 },
+              { "color": "green", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Live ROC-AUC (labelled traffic)",
+      "description": "Computed only from ground-truth labels submitted via /api/v1/feedback. Absent when no labels exist -- the platform never estimates production accuracy from unlabelled data.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 9, "y": 1 },
+      "targets": [
+        {
+          "expr": "max(fmops_live_model_metric{metric=\"roc_auc\", model_name=~\"$model\"})",
+          "legendFormat": "live roc_auc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 4,
+          "noValue": "no labels yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.7 },
+              { "color": "green", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Drift score",
+      "description": "Mean Jensen-Shannon distance across features, most recent scan.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
+      "targets": [
+        {
+          "expr": "max(fmops_drift_score{drift_type=\"data\", model_name=~\"$model\"})",
+          "legendFormat": "data drift"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 4,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.2 },
+              { "color": "red", "value": 0.4 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Rollbacks (24h)",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 1 },
+      "targets": [
+        { "expr": "sum(increase(fmops_rollbacks_total[24h]))", "legendFormat": "rollbacks" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Traffic and latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Prediction throughput by version",
+      "description": "During a canary rollout the split between versions is visible here.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(fmops_predictions_total{model_name=~\"$model\"}[5m])) by (model_version, variant)",
+          "legendFormat": "v{{model_version}} ({{variant}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" }, "lineWidth": 1 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Prediction latency percentiles",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(fmops_prediction_latency_seconds_bucket{model_name=~\"$model\"}[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fmops_prediction_latency_seconds_bucket{model_name=~\"$model\"}[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(fmops_prediction_latency_seconds_bucket{model_name=~\"$model\"}[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 8, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Error rate",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(fmops_predictions_total{outcome!=\"success\"}[5m])) / clamp_min(sum(rate(fmops_predictions_total[5m])), 0.001)",
+          "legendFormat": "prediction error rate"
+        },
+        {
+          "expr": "sum(rate(fmops_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(fmops_http_requests_total[5m])), 0.001)",
+          "legendFormat": "HTTP 5xx rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "max": 1, "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Predicted probability distribution",
+      "description": "Shifts here are the prediction-drift signal, visible without any labels.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 14 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(fmops_prediction_probability_bucket{model_name=~\"$model\"}[10m])) by (le))",
+          "legendFormat": "median probability"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(fmops_prediction_probability_bucket{model_name=~\"$model\"}[10m])) by (le))",
+          "legendFormat": "p90 probability"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "min": 0, "max": 1, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Traffic split (canary progress)",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 14 },
+      "targets": [
+        {
+          "expr": "fmops_deployment_traffic_percent{model_name=~\"$model\"}",
+          "legendFormat": "v{{model_version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "fillOpacity": 25, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Drift",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Drift score by type",
+      "description": "Concept drift only appears when ground-truth labels are available; data and prediction drift are computed from unlabelled traffic.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "expr": "fmops_drift_score{model_name=~\"$model\"}",
+          "legendFormat": "{{drift_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "bargauge",
+      "title": "Per-feature drift score",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        {
+          "expr": "topk(14, fmops_feature_drift_score{model_name=~\"$model\"})",
+          "legendFormat": "{{feature}}",
+          "instant": true
+        }
+      ],
+      "options": { "displayMode": "gradient", "orientation": "horizontal" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 4,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.15 },
+              { "color": "red", "value": 0.3 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Pipeline and system",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Retraining events",
+      "description": "Rejected candidates are a healthy signal: the gate kept a worse model out of production.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 31 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_retraining_events_total[1h])) by (status, trigger)",
+          "legendFormat": "{{trigger}} -> {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 30, "drawStyle": "bars" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Approval gate decisions",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 31 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_approval_decisions_total[6h])) by (decision)",
+          "legendFormat": "{{decision}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 30, "drawStyle": "bars" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Resources",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 31 },
+      "targets": [
+        { "expr": "fmops_process_cpu_percent", "legendFormat": "process CPU %" },
+        { "expr": "fmops_system_memory_percent", "legendFormat": "system memory %" },
+        { "expr": "fmops_process_memory_mb", "legendFormat": "process RSS (MB)" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "custom": { "fillOpacity": 8 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "process RSS (MB)" },
+            "properties": [{ "id": "unit", "value": "decmbytes" }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Alerts raised",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 38 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_alerts_total[1h])) by (severity, category)",
+          "legendFormat": "{{severity}} / {{category}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 30, "drawStyle": "bars" } },
+        "overrides": []
+      }
+    }
+  ]
+}

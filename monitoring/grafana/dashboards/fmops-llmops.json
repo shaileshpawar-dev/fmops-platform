@@ -1,0 +1,303 @@
+{
+  "uid": "fmops-llmops",
+  "title": "FMOps - LLMOps",
+  "description": "Token usage, cost, latency, prompt-version rollout, evaluation scores and safety findings. Note: when the provider is 'mock', all figures describe the deterministic offline provider, not a real model.",
+  "tags": ["fmops", "llmops"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "editable": true,
+  "templating": {
+    "list": [
+      {
+        "name": "provider",
+        "label": "Provider",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+        "query": "label_values(fmops_llm_requests_total, provider)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "llm_model",
+        "label": "Model",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+        "query": "label_values(fmops_llm_requests_total{provider=~\"$provider\"}, model)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Usage and cost",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Calls (24h)",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_llm_requests_total{provider=~\"$provider\", model=~\"$llm_model\"}[24h]))",
+          "legendFormat": "calls"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Tokens (24h)",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_llm_tokens_total{provider=~\"$provider\", model=~\"$llm_model\"}[24h]))",
+          "legendFormat": "tokens"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Estimated spend (24h)",
+      "description": "Derived from token counts and the configured price table. An estimate, not a vendor invoice. The mock provider is priced at $0.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_llm_cost_usd_total{provider=~\"$provider\", model=~\"$llm_model\"}[24h]))",
+          "legendFormat": "usd"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 20 },
+              { "color": "red", "value": 25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "p95 latency",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 13, "y": 1 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fmops_llm_latency_seconds_bucket{provider=~\"$provider\", model=~\"$llm_model\"}[30m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Error rate (1h)",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(fmops_llm_requests_total{outcome=\"error\"}[1h])) / clamp_min(sum(rate(fmops_llm_requests_total[1h])), 0.0001)",
+          "legendFormat": "error rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.05 },
+              { "color": "red", "value": 0.1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Token throughput by direction",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "expr": "sum(rate(fmops_llm_tokens_total{provider=~\"$provider\", model=~\"$llm_model\"}[5m])) by (direction, model)",
+          "legendFormat": "{{model}} {{direction}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Cumulative spend by model",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_llm_cost_usd_total{provider=~\"$provider\"}[1h])) by (model)",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "custom": { "fillOpacity": 25, "stacking": { "mode": "normal" }, "drawStyle": "bars" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Prompt versions and evaluation",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Calls by prompt version",
+      "description": "A prompt-version rollout is visible here the same way a model canary is on the MLOps board.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(fmops_llm_requests_total{provider=~\"$provider\"}[5m])) by (prompt_name, prompt_version)",
+          "legendFormat": "{{prompt_name}}@{{prompt_version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "bargauge",
+      "title": "Evaluation scores by prompt version",
+      "description": "Reference-free and reference-based proxy scores. Against the mock provider these measure the harness, not model quality.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "fmops_llm_evaluation_score{metric=~\"overall|correctness|faithfulness|keyword_coverage|format_validity\"}",
+          "legendFormat": "{{prompt_version}} / {{metric}}",
+          "instant": true
+        }
+      ],
+      "options": { "displayMode": "gradient", "orientation": "horizontal" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "green", "value": 0.75 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Safety",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Safety findings by check",
+      "description": "Heuristic pattern-matching screen. It over-reports on benign text and under-reports on paraphrased attacks; treat counts as a review queue, not a verdict.",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 16, "x": 0, "y": 23 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_llm_safety_findings_total[1h])) by (check, severity)",
+          "legendFormat": "{{check}} ({{severity}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 30, "drawStyle": "bars" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "Blocked requests (24h)",
+      "datasource": { "type": "prometheus", "uid": "fmops-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 23 },
+      "targets": [
+        {
+          "expr": "sum(increase(fmops_llm_requests_total{outcome=\"blocked\"}[24h]))",
+          "legendFormat": "blocked"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    }
+  ]
+}

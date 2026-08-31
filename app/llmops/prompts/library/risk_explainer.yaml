@@ -1,0 +1,53 @@
+name: risk_explainer
+description: >
+  Turn a loan-default model prediction into an explanation a human reviewer can
+  act on. This is the prompt that links the LLMOps layer to the ML model: the
+  same platform governs both.
+versions:
+  - version: "1.0.0"
+    description: Plain explanation from the model output and top features.
+    system: >
+      You are a credit risk analyst assistant. You explain model predictions
+      clearly and never present a model score as a final lending decision.
+    template: |
+      A loan-default model scored an application.
+
+      Predicted probability of default: {probability}
+      Decision threshold: {threshold}
+      Model version: {model_version}
+      Most influential features: {top_features}
+
+      Explain in plain language what drove this score and what a human reviewer
+      should check before deciding. Do not state that the application is
+      approved or rejected; that decision belongs to the reviewer.
+    variables: [probability, threshold, model_version, top_features]
+    temperature: 0.0
+    tags: [explanation]
+
+  - version: "1.1.0"
+    description: >
+      Adds an explicit uncertainty statement and a fairness caution, and forbids
+      inventing feature values that were not supplied.
+    system: >
+      You are a credit risk analyst assistant. You explain model predictions
+      clearly, state uncertainty honestly, and never present a model score as a
+      final lending decision. You never speculate about protected attributes.
+    template: |
+      A loan-default model scored an application.
+
+      Predicted probability of default: {probability}
+      Decision threshold: {threshold}
+      Model version: {model_version}
+      Most influential features: {top_features}
+
+      Write an explanation with three parts:
+      1. What the score means, in one sentence.
+      2. Which of the listed features pushed the score up or down. Use only the
+         features listed above; do not introduce any other feature or value.
+      3. What the reviewer should verify, and what this model cannot tell them.
+
+      State clearly that this is a statistical estimate, not a decision, and do
+      not speculate about age, gender, ethnicity, or any protected attribute.
+    variables: [probability, threshold, model_version, top_features]
+    temperature: 0.0
+    tags: [explanation, grounded, recommended]

@@ -1,0 +1,108 @@
+# Production profile: strict gates, canary rollout, auto-rollback, manual
+# approval required before a model reaches the Production stage.
+environment: production
+log_level: INFO
+log_format: json
+
+validation:
+  engine: native
+  min_rows: 5000
+  max_missing_fraction: 0.02
+  max_duplicate_fraction: 0.005
+  fail_on_warning: true
+
+training:
+  algorithm: hist_gradient_boosting
+  cv_folds: 5
+
+tuning:
+  enabled: true
+  backend: sagemaker
+  max_trials: 24
+  metric: roc_auc
+
+approval:
+  enabled: true
+  min_f1: 0.65
+  min_roc_auc: 0.75
+  min_precision: 0.55
+  min_recall: 0.55
+  max_inference_latency_ms: 150.0
+  require_clean_validation: true
+  max_drift_score: 0.20
+  comparison_metric: roc_auc
+  min_improvement: 0.01
+  require_manual_approval: true
+
+deployment:
+  provider: sagemaker
+  strategy: canary
+  endpoint_name: fmops-loan-default-prod
+  canary_steps: [10, 25, 50, 100]
+  canary_step_seconds: 300
+  canary_min_requests_per_step: 200
+  canary_max_error_rate: 0.02
+  canary_max_latency_ms: 200.0
+  auto_rollback: true
+  health_check_failures_before_rollback: 3
+  instance_type: ml.m5.xlarge
+  instance_count: 2
+
+drift:
+  enabled: true
+  threshold: 0.15
+  psi_threshold: 0.15
+  min_samples: 1000
+  reference_window: 20000
+  detection_window: 5000
+  dataset_drift_share: 0.25
+
+monitoring:
+  metrics_enabled: true
+  cloudwatch_enabled: true
+  cloudwatch_namespace: FMOps/Production
+  latency_slo_ms: 150.0
+  error_rate_slo: 0.01
+  prediction_log_sample_rate: 0.25
+
+alerts:
+  enabled: true
+  sinks: [log, database, sns]
+  dedupe_window_seconds: 900
+
+retraining:
+  enabled: true
+  triggers: [drift, performance, schedule]
+  min_new_samples: 5000
+  auto_deploy_if_better: false   # production promotion is a human decision
+  cooldown_minutes: 360
+
+llm:
+  provider: bedrock
+  model: anthropic.claude-sonnet-4-20250514-v1:0
+  safety_enabled: true
+  safety_block_on_violation: true
+  daily_cost_budget_usd: 100.0
+  monthly_cost_budget_usd: 2000.0
+
+aws:
+  enabled: true
+  region: us-east-1
+  s3_prefix: fmops/production
+
+tracking:
+  backend: mlflow
+  registry_backend: mlflow
+  experiment_name: fmops-loan-default-prod
+
+security:
+  auth_backend: api_key
+  require_auth_for_writes: true
+  audit_log_enabled: true
+  cors_allow_origins: []
+  max_batch_rows: 500
+
+server:
+  port: 8000
+  workers: 4
+  docs_enabled: false

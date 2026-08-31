@@ -1,0 +1,40 @@
+# Prometheus scrape configuration for the local FMOps stack.
+#
+# The API exposes /metrics in OpenMetrics text format. In AWS the same metrics
+# are additionally mirrored to CloudWatch (see app/aws/cloudwatch.py) for the
+# subset that alarms are built on -- CloudWatch custom metrics are billed per
+# metric per month, so the platform does not blindly mirror everything.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: fmops
+    environment: development
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  - job_name: fmops-api
+    metrics_path: /metrics
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: fmops-api
+          component: inference
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+# Alertmanager is not part of the local stack: the platform routes its own
+# alerts through app/monitoring/alerts.py (log, database, webhook, SNS), which
+# is what the drift and retraining paths already use. These Prometheus rules
+# exist so the same conditions are visible in Grafana and can drive an
+# Alertmanager in a real deployment.
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]

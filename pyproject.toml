@@ -1,0 +1,217 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fmops-platform"
+version = "1.0.0"
+description = "Foundation Model Operations Platform - MLOps and LLMOps lifecycle automation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "FMOps Platform" }]
+keywords = ["mlops", "llmops", "machine-learning", "monitoring", "drift", "sagemaker"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core runtime. Everything the platform needs to run locally, end to end.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "joblib>=1.3",
+    "mlflow>=2.16",
+    "prometheus-client>=0.20",
+    "httpx>=0.27",
+    "requests>=2.32",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+# AWS production backends: S3 artifacts, SageMaker, CloudWatch, Bedrock, SNS.
+aws = ["boto3>=1.35", "botocore>=1.35", "sagemaker>=2.230"]
+
+# Third-party data-quality and drift engines. The native engines work without
+# these; installing them enables the GE and Evidently adapters.
+quality = ["great-expectations>=1.0", "evidently>=0.7"]
+
+# Dataset versioning with a remote (S3) backend.
+data = ["dvc>=3.50", "dvc-s3>=3.2"]
+
+# Optional gradient-boosting estimators.
+boosting = ["xgboost>=2.0", "lightgbm>=4.0"]
+
+# Optional tuner backend.
+tuning = ["optuna>=4.0"]
+
+# LLM provider SDKs. The mock provider needs none of these.
+llm = ["anthropic>=0.40", "google-genai>=1.0", "openai>=1.50"]
+
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "black>=24.0",
+    "mypy>=1.11",
+    "bandit[toml]>=1.7",
+    "pip-audit>=2.7",
+    "types-PyYAML",
+    "types-requests",
+]
+
+all = [
+    "fmops-platform[aws,quality,data,boosting,tuning,llm]",
+]
+
+[project.scripts]
+fmops = "app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["app*", "pipelines*"]
+
+[tool.setuptools.package-data]
+"app.llmops.prompts" = ["library/*.yaml", "library/**/*.yaml"]
+
+# --------------------------------------------------------------------------- #
+# Lint / format
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 95
+target-version = "py311"
+exclude = [".venv", "artifacts", "data", ".git", "__pycache__", "terraform"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "S",    # bandit-style security checks
+    "RUF",
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # FastAPI Depends() in defaults is the framework idiom
+    "S101",    # assert is fine in tests
+    "SIM108",  # ternaries are not always clearer
+    "RUF012",  # ClassVar annotations not required for these mutable defaults
+    "UP042",   # (str, Enum) not StrEnum: keeps JSON serialisation identical
+               # across pydantic versions and stays importable on 3.10 tooling
+]
+
+[tool.ruff.lint.per-file-ignores]
+# S608 (SQL injection): these repositories build WHERE/SET clause *fragments*
+# from a closed set of code-defined literals, never from request data. Every
+# value is bound with a `?` placeholder. Verified by reading each call site.
+"app/core/db.py" = ["S608"]
+"app/deployment/base.py" = ["S608"]
+"app/llmops/cost.py" = ["S608"]
+"app/llmops/token_tracking.py" = ["S608"]
+"app/monitoring/inference_log.py" = ["S608", "S311"]
+"app/monitoring/alerts.py" = ["S608"]
+"app/retraining/trigger.py" = ["S608"]
+"app/registry/local.py" = ["S608"]
+# The "0.0.0.0" here is a substring test for a local base URL, not a bind.
+"app/llmops/providers/openai_compatible.py" = ["S104"]
+# Tests deliberately poke at internals, use fixed test credentials and assert.
+"tests/**" = ["S105", "S106", "S311", "SIM117"]
+# The synthetic data generator uses numpy RNG for data, not for security.
+"app/data/generator.py" = ["S311"]
+# The local deployment provider simulates traffic routing with a PRNG.
+"app/deployment/local_provider.py" = ["S311"]
+"app/llmops/providers/mock.py" = ["S311"]
+# The sys.path bootstrap must run before the app imports, so those
+# imports are deliberately not at the top of the file.
+"scripts/**" = ["S311", "T201", "E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "pipelines", "tests"]
+
+[tool.black]
+line-length = 95
+target-version = ["py311"]
+
+# --------------------------------------------------------------------------- #
+# Tests
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers --disable-warnings"
+markers = [
+    "unit: fast, isolated tests",
+    "integration: tests that exercise the API or MLflow",
+    "pipeline: end-to-end pipeline tests (slower)",
+    "slow: excluded from the default CI fast lane",
+    "aws: requires real AWS credentials; skipped by default",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.coverage.run]
+source = ["app", "pipelines"]
+omit = ["*/__init__.py", "*/aws/*", "app/cli.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+
+# --------------------------------------------------------------------------- #
+# Typing / security
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+exclude = ["tests/", "\\.venv/"]
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests", "artifacts", "data", "scripts"]
+# Each skip below was reviewed at every call site rather than waved through.
+# Anything not listed here is a real finding and fails CI.
+skips = [
+  # B101 assert: used in tests only (excluded above) and in internal invariants.
+  "B101",
+  # B104 "binding to all interfaces": two occurrences, neither a bind.
+  #   - server.host default "0.0.0.0" is the correct container binding; the
+  #     container is not directly internet-facing (see docs/deployment.md).
+  #   - openai_compatible.py compares the base URL against "0.0.0.0" to decide
+  #     whether an API key is required. It is a substring test, not a socket.
+  "B104",
+  # B311 non-cryptographic RNG: used for synthetic data generation, traffic
+  # weighting and log sampling. None of these are security decisions.
+  "B311",
+  # B404/B603/B607 subprocess: three fixed-argv, shell=False, short-timeout
+  # calls to `git` and `dvc`, with no user input reaching the argument list.
+  # The executables resolve from PATH deliberately -- pinning absolute paths
+  # would break inside containers and virtualenvs.
+  "B404", "B603", "B607",
+  # B608 SQL: the repositories build WHERE/SET clause *fragments* from a closed
+  # set of code-defined literals. Every value is bound with a `?` placeholder;
+  # no request data is ever interpolated into SQL text.
+  "B608",
+]

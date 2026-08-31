@@ -1,0 +1,370 @@
+name: CI
+
+# Continuous integration for the FMOps platform.
+#
+# Lanes run in parallel and fail independently so a formatting nit does not hide
+# a failing pipeline test:
+#
+#   quality      format, lint, types
+#   security     dependency audit, static analysis, secret scan
+#   test         unit + integration (fast, every push)
+#   pipeline     end-to-end lifecycle tests (slower; trains real models)
+#   docker       build all three images and smoke-test the API image
+#   terraform    fmt + validate
+#
+# Nothing here needs AWS credentials: the whole platform runs locally.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  FMOPS_ENV: test
+  FMOPS_LOG_FORMAT: json
+  FMOPS_LOG_LEVEL: WARNING
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Format, lint and types
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check formatting
+        run: black --check --diff app pipelines scripts tests
+
+      - name: Lint
+        run: ruff check app pipelines scripts tests --output-format=github
+
+      - name: Type check
+        # Types are advisory on this codebase: the ML libraries are largely
+        # untyped, so a hard failure here would be noise rather than signal.
+        run: mypy app || echo "::warning::mypy reported issues (advisory)"
+
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Static analysis (bandit)
+        run: bandit -r app pipelines -c pyproject.toml -ll
+
+      - name: Dependency vulnerability audit
+        # Advisory: a new CVE in a transitive dependency should be visible
+        # immediately but must not block an unrelated bugfix from merging.
+        run: pip-audit --strict --desc || echo "::warning::pip-audit found advisories"
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assert no committed secrets or state
+        run: |
+          set -e
+          if [ -f .env ]; then
+            echo "::error::.env is committed; it must be git-ignored"
+            exit 1
+          fi
+          if git ls-files | grep -E '\.tfstate|terraform\.tfvars$|\.pem$|credentials$'; then
+            echo "::error::state, tfvars or credential files are committed"
+            exit 1
+          fi
+          echo "no secret-bearing files are tracked"
+
+  test:
+    name: Unit and integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest tests/unit -v --cov=app --cov-report=xml --cov-report=term-missing
+
+      - name: Integration tests
+        run: pytest tests/integration -v --cov=app --cov-append --cov-report=xml
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 7
+
+  pipeline:
+    name: End-to-end pipeline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # These really train models and exercise the drift -> retrain -> reject /
+      # promote -> rollback path, which is the behaviour the platform exists for.
+      - name: Lifecycle tests
+        run: pytest tests/pipeline -v --durations=10
+
+  pipeline-smoke:
+    name: Pipeline smoke run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FMOPS_ENV: development
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      # Proves the documented commands actually work, not just the test suite.
+      - name: Generate data
+        run: python -m app.cli data generate
+
+      - name: Validate data
+        run: python -m app.cli data validate
+
+      - name: Train and promote
+        run: |
+          python -m pipelines.training_pipeline \
+            --no-tune --promote --report artifacts/reports/ci-training.json
+
+      - name: Deploy
+        run: python -m pipelines.deployment_pipeline --strategy blue_green
+
+      - name: Simulate traffic
+        run: python -m app.cli simulate --rows 300 --label-fraction 0.3
+
+      - name: Drift scan on clean traffic
+        run: |
+          python -m app.cli drift scan
+          echo "clean traffic scanned (exit $? -- 2 would mean drift detected)"
+        continue-on-error: true
+
+      - name: Simulate drifted traffic and confirm detection
+        run: |
+          python -m app.cli simulate --rows 600 --drift severe --seed 555
+          set +e
+          python -m app.cli drift scan
+          code=$?
+          set -e
+          if [ "$code" != "2" ]; then
+            echo "::error::drift was NOT detected on deliberately drifted traffic"
+            exit 1
+          fi
+          echo "drift correctly detected"
+
+      - name: Retraining trigger fires
+        run: |
+          set +e
+          python -m app.cli retrain --check-only
+          code=$?
+          set -e
+          if [ "$code" != "2" ]; then
+            echo "::error::the retraining trigger did not fire after drift"
+            exit 1
+          fi
+          echo "retraining trigger fired as expected"
+
+      - name: LLMOps smoke (mock provider, no API key)
+        run: |
+          python -m app.cli llm prompts
+          python -m app.cli llm generate --prompt support_summarizer \
+            --prompt-version 1.1.0 --var ticket_text="I was billed twice"
+          python -m app.cli llm eval --dataset support_triage --compare 1.0.0 1.1.0
+          python -m app.cli llm cost
+
+      - name: Platform status
+        run: python -m app.cli status
+
+      - name: Upload run reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-reports
+          path: artifacts/reports/
+          retention-days: 7
+
+  docker:
+    name: Build container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/api.Dockerfile
+          push: false
+          load: true
+          tags: fmops/api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build training image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/training.Dockerfile
+          push: false
+          tags: fmops/training:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build inference image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/inference.Dockerfile
+          push: false
+          tags: fmops/inference:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container must not run as root
+        run: |
+          user=$(docker run --rm --entrypoint sh fmops/api:ci -c 'id -u')
+          if [ "$user" = "0" ]; then
+            echo "::error::the API image runs as root"
+            exit 1
+          fi
+          echo "API image runs as uid $user"
+
+      - name: API image starts and answers /health/live
+        run: |
+          docker run -d --name fmops-ci -p 8000:8000 \
+            -e FMOPS_ENV=development fmops/api:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health/live >/dev/null 2>&1; then
+              echo "API is live"
+              curl -s http://localhost:8000/health | head -c 500
+              docker rm -f fmops-ci
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the API image did not become live within 60s"
+          docker logs fmops-ci
+          docker rm -f fmops-ci
+          exit 1
+
+      - name: Scan the API image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: fmops/api:ci
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "0" # advisory; base-image CVEs should not block a merge
+          ignore-unfixed: true
+
+  terraform:
+    name: Terraform validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Format check
+        run: terraform fmt -check -recursive terraform/
+
+      - name: Validate
+        working-directory: terraform
+        # No backend and no credentials: this checks the configuration is
+        # internally consistent, not that it can reach AWS.
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  compose:
+    name: Docker Compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: docker compose config --quiet && echo "compose file is valid"
+
+  ci-complete:
+    name: CI complete
+    runs-on: ubuntu-latest
+    needs: [quality, security, test, pipeline, pipeline-smoke, docker, terraform, compose]
+    if: always()
+    steps:
+      - name: Fail if any required lane failed
+        run: |
+          if echo '${{ join(needs.*.result, ',') }}' | grep -q -E 'failure|cancelled'; then
+            echo "::error::one or more CI lanes failed"
+            exit 1
+          fi
+          echo "all CI lanes passed"

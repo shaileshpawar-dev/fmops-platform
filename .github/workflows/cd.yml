@@ -1,0 +1,370 @@
+name: CD
+
+# Continuous delivery.
+#
+#   build -> push to ECR -> deploy staging -> smoke test
+#         -> [manual approval] -> deploy production -> verify -> rollback on failure
+#
+# Authentication is GitHub OIDC only. There is no AWS_SECRET_ACCESS_KEY in this
+# repository; the role ARN is a *variable*, not a secret, because an ARN is not
+# sensitive and treating it as one only makes debugging harder.
+#
+# Production requires a GitHub Environment approval. That is the human gate the
+# platform's own `require_manual_approval` setting mirrors.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        default: staging
+      model_version:
+        description: Model version to deploy (blank = latest approved)
+        type: string
+        required: false
+      strategy:
+        description: Deployment strategy
+        type: choice
+        options: [blue_green, canary, shadow, direct]
+        default: canary
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false # never cancel a deployment mid-rollout
+
+env:
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC
+  packages: write
+
+jobs:
+  # --------------------------------------------------------------------- #
+  guard:
+    name: Pre-flight
+    runs-on: ubuntu-latest
+    outputs:
+      aws_configured: ${{ steps.check.outputs.aws_configured }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        name: Is AWS configured for this repository?
+        run: |
+          if [ -n "${{ vars.AWS_ROLE_ARN }}" ] && [ -n "${{ vars.ECR_REGISTRY }}" ]; then
+            echo "aws_configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "aws_configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS_ROLE_ARN / ECR_REGISTRY are not set, so the "\
+                 "push and deploy jobs will be skipped. Run terraform and set "\
+                 "them as repository variables to enable CD."
+          fi
+
+      - id: meta
+        name: Compute the image tag
+        run: |
+          # Tag by commit SHA: immutable, and traceable back to the exact code.
+          echo "image_tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------- #
+  build-and-push:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    needs: guard
+    if: needs.guard.outputs.aws_configured == 'true'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: fmops-cd-${{ github.run_id }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/api.Dockerfile
+          push: true
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/api:${{ needs.guard.outputs.image_tag }}
+            ${{ vars.ECR_REGISTRY }}/api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push training image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/training.Dockerfile
+          push: true
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/training:${{ needs.guard.outputs.image_tag }}
+            ${{ vars.ECR_REGISTRY }}/training:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push inference image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/inference.Dockerfile
+          push: true
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/inference:${{ needs.guard.outputs.image_tag }}
+            ${{ vars.ECR_REGISTRY }}/inference:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan pushed image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ vars.ECR_REGISTRY }}/api:${{ needs.guard.outputs.image_tag }}
+          format: sarif
+          output: trivy.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-results
+          path: trivy.sarif
+          retention-days: 30
+
+  # --------------------------------------------------------------------- #
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: [guard, build-and-push]
+    if: needs.guard.outputs.aws_configured == 'true'
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    timeout-minutes: 30
+    env:
+      FMOPS_ENV: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[aws]"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: fmops-staging-${{ github.run_id }}
+
+      - name: Verify AWS access
+        run: python -m app.cli aws status
+
+      - name: Evaluate the release candidate against the approval gate
+        id: evaluate
+        env:
+          FMOPS_AWS__ENABLED: "true"
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+        run: |
+          set +e
+          python -m pipelines.evaluation_pipeline \
+            ${{ inputs.model_version && format('--version {0}', inputs.model_version) || '' }} \
+            --report artifacts/reports/staging-evaluation.json
+          code=$?
+          set -e
+          echo "gate_exit=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "2" ]; then
+            echo "::error::the candidate failed the approval gate; not deploying"
+            exit 1
+          fi
+          if [ "$code" != "0" ]; then
+            exit "$code"
+          fi
+
+      - name: Deploy
+        env:
+          FMOPS_AWS__ENABLED: "true"
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+          FMOPS_AWS__SAGEMAKER_ROLE_ARN: ${{ vars.SAGEMAKER_ROLE_ARN }}
+          FMOPS_AWS__SAGEMAKER_TRAINING_IMAGE: ${{ vars.ECR_REGISTRY }}/inference:${{ needs.guard.outputs.image_tag }}
+        run: |
+          python -m pipelines.deployment_pipeline \
+            --strategy ${{ inputs.strategy || 'blue_green' }} \
+            ${{ inputs.model_version && format('--version {0}', inputs.model_version) || '' }} \
+            --report artifacts/reports/staging-deployment.json
+
+      - name: Smoke test the staging endpoint
+        if: vars.STAGING_URL != ''
+        run: |
+          set -e
+          curl -fsS "${{ vars.STAGING_URL }}/health/ready"
+          curl -fsS -X POST "${{ vars.STAGING_URL }}/api/v1/predict" \
+            -H 'Content-Type: application/json' \
+            -H "X-API-Key: ${{ secrets.STAGING_API_KEY }}" \
+            -d '{"features":{"age":40,"annual_income":72000,"loan_amount":20000,
+                 "loan_term_months":36,"credit_score":700,"debt_to_income":0.25,
+                 "employment_years":8,"num_credit_lines":6,"num_late_payments_12m":0,
+                 "credit_utilization":0.3,"employment_type":"salaried",
+                 "housing_status":"own","loan_purpose":"auto","region":"west"}}' \
+            | tee /tmp/prediction.json
+          python -c "
+          import json,sys
+          d=json.load(open('/tmp/prediction.json'))
+          assert d['prediction'] in (0,1), d
+          assert 0.0 <= d['probability'] <= 1.0, d
+          print('smoke test passed: v%s p=%.4f' % (d['model_version'], d['probability']))
+          "
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: staging-reports
+          path: artifacts/reports/
+          retention-days: 30
+
+  # --------------------------------------------------------------------- #
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: [guard, deploy-staging]
+    # The `production` GitHub Environment must have required reviewers
+    # configured; that is what turns this into a human approval gate.
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    if: |
+      needs.guard.outputs.aws_configured == 'true' &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.environment == 'production')
+    timeout-minutes: 45
+    env:
+      FMOPS_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[aws]"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: fmops-prod-${{ github.run_id }}
+
+      - name: Record the current production version for rollback
+        id: current
+        env:
+          FMOPS_AWS__ENABLED: "true"
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+        run: |
+          version=$(python -c "
+          from app.registry.factory import get_registry
+          from app.core.config import get_settings
+          p = get_registry().get_production(get_settings().tracking.registered_model_name)
+          print(p.version if p else '')
+          ")
+          echo "previous_version=$version" >> "$GITHUB_OUTPUT"
+          echo "current production version: ${version:-none}"
+
+      - name: Canary deploy
+        id: deploy
+        env:
+          FMOPS_AWS__ENABLED: "true"
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+          FMOPS_AWS__SAGEMAKER_ROLE_ARN: ${{ vars.SAGEMAKER_ROLE_ARN }}
+          FMOPS_AWS__SAGEMAKER_TRAINING_IMAGE: ${{ vars.ECR_REGISTRY }}/inference:${{ needs.guard.outputs.image_tag }}
+        run: |
+          python -m pipelines.deployment_pipeline \
+            --strategy ${{ inputs.strategy || 'canary' }} \
+            ${{ inputs.model_version && format('--version {0}', inputs.model_version) || '' }} \
+            --report artifacts/reports/production-deployment.json
+
+      - name: Verify production health
+        if: vars.PRODUCTION_URL != ''
+        run: |
+          set -e
+          for i in $(seq 1 10); do
+            if curl -fsS "${{ vars.PRODUCTION_URL }}/health/ready"; then
+              echo "production is ready"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::production did not become ready"
+          exit 1
+
+      # Automatic rollback. The deployment pipeline already rolls back on its
+      # own smoke-test failure; this catches everything after that point.
+      - name: Roll back on failure
+        if: failure() && steps.current.outputs.previous_version != ''
+        env:
+          FMOPS_AWS__ENABLED: "true"
+          FMOPS_AWS__S3_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+        run: |
+          echo "::warning::deployment failed; rolling back to v${{ steps.current.outputs.previous_version }}"
+          python -m app.cli rollback \
+            --to-version ${{ steps.current.outputs.previous_version }} \
+            --reason "automatic rollback: CD run ${{ github.run_id }} failed"
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-reports
+          path: artifacts/reports/
+          retention-days: 90
+
+  # --------------------------------------------------------------------- #
+  skipped-notice:
+    name: CD skipped
+    runs-on: ubuntu-latest
+    needs: guard
+    if: needs.guard.outputs.aws_configured != 'true'
+    steps:
+      - name: Explain
+        run: |
+          echo "### CD skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "AWS is not configured for this repository, so nothing was" >> "$GITHUB_STEP_SUMMARY"
+          echo "built, pushed or deployed. To enable CD:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '1. `cd terraform && terraform apply -var environment=staging`' >> "$GITHUB_STEP_SUMMARY"
+          echo '2. Set repository *variables*: `AWS_ROLE_ARN`, `ECR_REGISTRY`,' >> "$GITHUB_STEP_SUMMARY"
+          echo '   `ARTIFACT_BUCKET`, `SAGEMAKER_ROLE_ARN`, `AWS_REGION`.' >> "$GITHUB_STEP_SUMMARY"
+          echo '3. Create `staging` and `production` GitHub Environments, with' >> "$GITHUB_STEP_SUMMARY"
+          echo '   required reviewers on `production`.' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo 'The platform itself is fully functional locally without any of this.' >> "$GITHUB_STEP_SUMMARY"
