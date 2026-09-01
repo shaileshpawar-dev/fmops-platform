@@ -119,7 +119,7 @@ def cmd_train(args: argparse.Namespace) -> int:
     print(f"  dataset          : {result.dataset_version}")
     print(f"  git commit       : {result.git_commit[:12]}")
     print(f"  duration         : {result.duration_seconds}s")
-    if metrics:
+    if metrics and result.evaluation is not None:
         print(f"  threshold        : {result.evaluation.threshold:.4f}")
         print(
             f"  metrics          : f1={metrics.f1:.4f} roc_auc={metrics.roc_auc:.4f} "
@@ -146,9 +146,8 @@ def cmd_promote(args: argparse.Namespace) -> int:
     settings = get_settings()
     registry = get_registry()
     name = settings.tracking.registered_model_name
-    version = args.version or (
-        registry.get_latest(name).version if registry.get_latest(name) else None
-    )
+    latest = registry.get_latest(name)
+    version = args.version or (latest.version if latest else None)
     if version is None:
         print("no model versions are registered; run 'fmops train' first")
         return 1
@@ -164,8 +163,8 @@ def cmd_promote(args: argparse.Namespace) -> int:
         evaluation=EvaluationResult(
             model_name=name,
             model_version=version,
-            metrics=Metrics(
-                **{k: v for k, v in model_version.metrics.items() if k in Metrics.model_fields}
+            metrics=Metrics.model_validate(
+                {k: v for k, v in model_version.metrics.items() if k in Metrics.model_fields}
             ),
         ),
     )

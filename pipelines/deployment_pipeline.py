@@ -57,12 +57,16 @@ def run(
         )
     except FMOpsError as exc:
         logger.error("pipeline.deployment_failed", extra={"error": exc.message})
-        report = {"status": "failed", "error": exc.message, "model_version": target}
+        report: dict[str, Any] = {
+            "status": "failed",
+            "error": exc.message,
+            "model_version": target,
+        }
         if report_path:
             write_json(report_path, report)
         return 1, report
 
-    report: dict[str, Any] = {
+    report = {
         "pipeline": "deployment",
         "model_version": target,
         "strategy": result.strategy.value,

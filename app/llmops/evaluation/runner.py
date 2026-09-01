@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -108,9 +108,8 @@ class EvaluationRunner:
     ) -> LLMEvaluationResult:
         if not isinstance(dataset, LLMEvalDataset):
             candidates = discover_datasets(self.settings)
-            path = (
-                candidates.get(str(dataset)) if str(dataset) in candidates else Path(dataset)
-            )
+            key = str(dataset)
+            path = candidates[key] if key in candidates else Path(dataset)
             dataset = load_dataset(path)
 
         resolved_prompt = (
@@ -333,6 +332,7 @@ def compare(
             provider_b=b.provider,
         )
 
+    dimension: Literal["model", "prompt"]
     if a.model != b.model:
         dimension = "model"
         variant_a, variant_b = a.model, b.model

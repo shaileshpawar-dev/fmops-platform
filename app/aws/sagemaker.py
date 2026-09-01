@@ -96,7 +96,7 @@ class SageMakerClient:
         aws = self.settings.aws
         job_name = _job_name("fmops-train")
 
-        request = {
+        request: dict[str, Any] = {
             "TrainingJobName": job_name,
             "AlgorithmSpecification": {
                 "TrainingImage": aws.sagemaker_training_image,
@@ -198,7 +198,7 @@ class SageMakerClient:
         job_name = _job_name("fmops-hpo")
         ranges = self._parameter_ranges(search_space)
 
-        request = {
+        request: dict[str, Any] = {
             "HyperParameterTuningJobName": job_name,
             "HyperParameterTuningJobConfig": {
                 "Strategy": "Bayesian",

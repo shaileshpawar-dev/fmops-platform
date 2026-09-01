@@ -18,6 +18,7 @@ separation is what lets the same canary logic run locally and on SageMaker.
 
 from __future__ import annotations
 
+import builtins
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -213,7 +214,9 @@ class DeploymentStore:
             },
         )
 
-    def events(self, deployment_id: str, limit: int = 100) -> list[DeploymentEvent]:
+    # builtins.list, not bare list: this class defines a method named `list`,
+    # which shadows the builtin for annotations evaluated in class scope.
+    def events(self, deployment_id: str, limit: int = 100) -> builtins.list[DeploymentEvent]:
         rows = self.db.query(
             "SELECT * FROM deployment_events WHERE deployment_id = ? "
             "ORDER BY id ASC LIMIT ?",

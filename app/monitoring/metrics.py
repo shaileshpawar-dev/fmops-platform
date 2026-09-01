@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 from prometheus_client import (
     CollectorRegistry,
@@ -504,7 +504,7 @@ class Timer:
         self._start = time.perf_counter()
         return self
 
-    def __exit__(self, *exc: Any) -> bool:
+    def __exit__(self, *exc: Any) -> Literal[False]:
         self.elapsed = time.perf_counter() - self._start
         return False
 

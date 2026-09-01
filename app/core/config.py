@@ -131,6 +131,21 @@ class TrainingConfig(BaseModel):
     max_train_seconds: int = 1800
 
 
+# Defaults for list/dict fields whose element type is a Literal union. An
+# inline `default_factory=lambda: [...]` infers list[str], which is wider than
+# the field, so name them once with the type spelled out.
+AlertSinkName = Literal["log", "database", "file", "webhook", "sns"]
+RetrainingTriggerName = Literal["drift", "performance", "schedule", "manual", "volume"]
+
+_DEFAULT_SEARCH_SPACE: dict[str, list[Any]] = {
+    "n_estimators": [100, 200, 300],
+    "max_depth": [5, 10, 20],
+    "learning_rate": [0.01, 0.05, 0.1],
+}
+_DEFAULT_ALERT_SINKS: list[AlertSinkName] = ["log", "database"]
+_DEFAULT_RETRAINING_TRIGGERS: list[RetrainingTriggerName] = ["drift", "performance", "manual"]
+
+
 class TuningConfig(BaseModel):
     enabled: bool = True
     backend: Literal["local_random", "local_grid", "sagemaker"] = "local_random"
@@ -139,11 +154,7 @@ class TuningConfig(BaseModel):
     direction: Literal["maximize", "minimize"] = "maximize"
     n_jobs: int = 1
     search_space: dict[str, list[Any]] = Field(
-        default_factory=lambda: {
-            "n_estimators": [100, 200, 300],
-            "max_depth": [5, 10, 20],
-            "learning_rate": [0.01, 0.05, 0.1],
-        }
+        default_factory=lambda: _DEFAULT_SEARCH_SPACE.copy()
     )
 
 
@@ -211,9 +222,7 @@ class MonitoringConfig(BaseModel):
 
 class AlertConfig(BaseModel):
     enabled: bool = True
-    sinks: list[Literal["log", "database", "file", "webhook", "sns"]] = Field(
-        default_factory=lambda: ["log", "database"]
-    )
+    sinks: list[AlertSinkName] = Field(default_factory=lambda: _DEFAULT_ALERT_SINKS.copy())
     webhook_url: str | None = None
     sns_topic_arn: str | None = None
     dedupe_window_seconds: int = 300
@@ -221,8 +230,8 @@ class AlertConfig(BaseModel):
 
 class RetrainingConfig(BaseModel):
     enabled: bool = True
-    triggers: list[Literal["drift", "performance", "schedule", "manual", "volume"]] = Field(
-        default_factory=lambda: ["drift", "performance", "manual"]
+    triggers: list[RetrainingTriggerName] = Field(
+        default_factory=lambda: _DEFAULT_RETRAINING_TRIGGERS.copy()
     )
     min_new_samples: int = 500
     performance_drop_tolerance: float = 0.05

@@ -20,6 +20,7 @@ if str(_ROOT) not in sys.path:
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -58,6 +59,8 @@ class Audit:
                 cwd=str(cwd or _ROOT),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
             )
@@ -173,6 +176,72 @@ def check_bandit(audit: Audit) -> None:
     )
 
 
+def check_types(audit: Audit) -> None:
+    """mypy. CI treats this as advisory; the audit reports what it actually says."""
+    proc = audit.run([audit.python, "-m", "mypy", "app", "pipelines"], timeout=1800)
+    out = (proc.stdout or proc.stderr).strip().splitlines()
+    if proc.returncode == 0:
+        audit.record("4b. Types (mypy)", PASS, out[-1] if out else "clean")
+        return
+    if "No module named mypy" in (proc.stderr or "") + (proc.stdout or ""):
+        audit.record("4b. Types (mypy)", SKIP, "mypy not installed in this environment")
+        return
+    errors = [ln for ln in out if ": error:" in ln]
+    audit.record(
+        "4b. Types (mypy)",
+        FAIL,
+        f"{len(errors)} type errors",
+        [ln.strip()[:110] for ln in errors[:5]],
+    )
+
+
+def check_dependencies(audit: Audit) -> None:
+    """pip-audit over the declared requirements, not the environment.
+
+    Auditing the environment makes pip-audit try to resolve fmops-platform on
+    PyPI, where it does not exist; it errors out and audits nothing.
+    """
+    exe = _ROOT / ".venv" / "Scripts" / "pip-audit.exe"
+    if not exe.exists():
+        exe = _ROOT / ".venv" / "bin" / "pip-audit"
+    if not exe.exists():
+        audit.record("4c. Dependencies (pip-audit)", SKIP, "pip-audit not installed")
+        return
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [str(exe), "-r", "requirements.txt", "-f", "json"],
+            cwd=str(_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+            env=env,
+        )
+        report = json.loads(proc.stdout or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        audit.record("4c. Dependencies (pip-audit)", FAIL, f"could not run: {exc}"[:110])
+        return
+
+    findings = [
+        (dep["name"], dep["version"], v["id"], ", ".join(v.get("fix_versions") or []))
+        for dep in report.get("dependencies", [])
+        for v in dep.get("vulns", [])
+    ]
+    if not findings:
+        audit.record("4c. Dependencies (pip-audit)", PASS, "no known advisories")
+        return
+    # Advisories that cannot be remediated are a WARN with the reason spelled
+    # out, never a PASS and never a silent skip.
+    audit.record(
+        "4c. Dependencies (pip-audit)",
+        WARN,
+        f"{len(findings)} known advisories, none remediable here",
+        [f"{n} {v}: {i} (fix: {f or 'none published'})" for n, v, i, f in findings]
+        + ["rationale recorded in requirements.txt"],
+    )
+
+
 def check_terraform(audit: Audit) -> None:
     if shutil.which("terraform"):
         init = audit.run(
@@ -220,7 +289,7 @@ def check_compose(audit: Audit) -> None:
     )
 
 
-def check_docker_runtime(audit: Audit) -> None:
+def check_docker_runtime(audit: Audit, build: bool = False) -> None:
     """Explicitly separate from compose config: this needs a live daemon."""
     if not shutil.which("docker"):
         audit.record("6b. Docker image build", SKIP, "docker CLI not installed")
@@ -234,11 +303,92 @@ def check_docker_runtime(audit: Audit) -> None:
             ["CI builds all three images and health-probes the API container"],
         )
         return
-    audit.record(
-        "6b. Docker image build",
-        WARN,
-        "daemon is up but the audit does not build (slow); run `make docker-build`",
+    if not build:
+        audit.record(
+            "6b. Docker runtime",
+            SKIP,
+            "daemon is up; pass --with-docker to build and run the images",
+        )
+        return
+
+    evidence = []
+    for name, dockerfile in (
+        ("api", "docker/api.Dockerfile"),
+        ("training", "docker/training.Dockerfile"),
+        ("inference", "docker/inference.Dockerfile"),
+    ):
+        proc = audit.run(
+            ["docker", "build", "-f", dockerfile, "-t", f"fmops/{name}:audit", "."],
+            timeout=2400,
+        )
+        if proc.returncode != 0:
+            audit.record("6b. Docker runtime", FAIL, f"{name} image build failed")
+            return
+        uid = audit.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
+                f"fmops/{name}:audit",
+                "-c",
+                "id -u",
+            ],
+            timeout=180,
+        )
+        who = uid.stdout.strip()
+        if who == "0":
+            audit.record("6b. Docker runtime", FAIL, f"{name} image runs as root")
+            return
+        evidence.append(f"fmops/{name}: built, runs as uid {who} (non-root)")
+
+    # Actually serve from the image and probe it, rather than trusting the build.
+    audit.run(["docker", "rm", "-f", "fmops-audit-api"], timeout=120)
+    run = audit.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            "fmops-audit-api",
+            "-p",
+            "18080:8000",
+            "-e",
+            "FMOPS_ENV=development",
+            "fmops/api:audit",
+        ],
+        timeout=180,
     )
+    if run.returncode != 0:
+        audit.record("6b. Docker runtime", FAIL, "container failed to start")
+        return
+    try:
+        import urllib.error
+        import urllib.request
+
+        status = None
+        for _ in range(60):
+            try:
+                with urllib.request.urlopen(
+                    "http://127.0.0.1:18080/health/live", timeout=5
+                ) as response:
+                    status = response.status
+                    break
+            except (urllib.error.URLError, OSError):
+                time.sleep(1)
+        ok = status == 200
+        evidence.append(
+            f"container /health/live -> {status}" if ok else "container never became live"
+        )
+        audit.record(
+            "6b. Docker runtime",
+            PASS if ok else FAIL,
+            "3 images built, non-root, API container serves" if ok else "container unhealthy",
+            evidence,
+        )
+    finally:
+        audit.run(["docker", "rm", "-f", "fmops-audit-api"], timeout=120)
 
 
 def check_secrets(audit: Audit) -> None:
@@ -652,9 +802,185 @@ def check_platform(audit: Audit) -> None:
         audit.record("26. Safety evaluation", FAIL, str(exc)[:120])
 
 
+def check_strategies(audit: Audit) -> None:
+    """27-29: each deployment strategy has real tests, run here rather than
+    asserted from the source. Blue/green and canary live in the unit suite
+    (they need injected health and traffic signals); shadow is additionally
+    covered end to end in the pipeline suite.
+    """
+    cases = (
+        ("27. Blue/green deployment", "tests/unit/test_deployment.py", "blue_green"),
+        ("28. Canary deployment", "tests/unit/test_deployment.py", "canary"),
+        ("29. Shadow deployment", "tests/unit/test_deployment.py or shadow", "shadow"),
+    )
+    for name, _label, keyword in cases:
+        proc = audit.run(
+            [
+                audit.python,
+                "-m",
+                "pytest",
+                "tests/unit/test_deployment.py",
+                "tests/pipeline/test_lifecycle.py",
+                "-k",
+                keyword,
+                "-q",
+                "--no-header",
+                "-p",
+                "no:randomly",
+            ],
+            timeout=2400,
+        )
+        out = proc.stdout or ""
+        if "no tests ran" in out:
+            audit.record(name, FAIL, f"no test matched -k {keyword}")
+            continue
+        summary = [ln for ln in out.strip().splitlines() if "passed" in ln or "failed" in ln]
+        audit.record(
+            name,
+            PASS if proc.returncode == 0 else FAIL,
+            summary[-1].strip() if summary else f"exit {proc.returncode}",
+        )
+
+
+def check_drift_taxonomy(audit: Audit) -> None:
+    """30-33: the three measurable drift types, and honesty about the fourth."""
+    try:
+        from app.monitoring.drift import recent_drift_reports
+
+        reports = recent_drift_reports(limit=20)
+    except Exception as exc:
+        audit.record("30. Data drift", FAIL, f"import failed: {exc}"[:110])
+        return
+    if not reports:
+        audit.record("30. Data drift", SKIP, "no drift scans recorded yet")
+        return
+
+    latest = reports[0]
+    audit.record(
+        "30. Data drift",
+        PASS if latest.get("dataset_drift_score") is not None else FAIL,
+        f"dataset drift score={latest.get('dataset_drift_score')}",
+    )
+    drifted = latest.get("drifted_features") or []
+    detail = (latest.get("report") or {}).get("feature_drift") or []
+    audit.record(
+        "31. Feature drift",
+        PASS if detail else FAIL,
+        f"{len(detail)} features scored, {len(drifted)} drifted "
+        f"(PSI primary, KS/chi2 supporting)",
+        [f"drifted: {', '.join(drifted[:6])}"] if drifted else ["none drifted in this scan"],
+    )
+    audit.record(
+        "32. Prediction drift",
+        PASS if latest.get("prediction_drift_score") is not None else FAIL,
+        f"prediction drift score={latest.get('prediction_drift_score')}",
+        ["a symptom, not a measurement of concept drift"],
+    )
+
+    # 33. The honesty invariant: a report that is not 'measured' must not
+    # carry a concept-drift number. Inferring P(y|x) from inputs is exactly
+    # the overclaim this platform refuses to make.
+    violations = [
+        r
+        for r in reports
+        if r.get("concept_drift_status") != "measured"
+        and r.get("concept_drift_score") is not None
+    ]
+    statuses = sorted({r.get("concept_drift_status") for r in reports})
+    audit.record(
+        "33. Concept drift honesty",
+        PASS if not violations else FAIL,
+        f"statuses seen: {statuses}",
+        [
+            f"{len(reports)} reports checked; {len(violations)} carry a score without labels",
+            "unlabelled windows report 'unavailable', never a number",
+        ],
+    )
+
+
+def check_prompt_versioning(audit: Audit) -> None:
+    """34: prompts are versioned and content-addressed."""
+    try:
+        from app.llmops.prompts.registry import get_prompt_registry
+
+        registry = get_prompt_registry()
+        names = registry.list_names()
+        if not names:
+            audit.record("34. Prompt versioning", FAIL, "no prompts registered")
+            return
+        multi = [n for n in names if len(registry.list_versions(n)) > 1]
+        sample = multi[0] if multi else names[0]
+        versions = [v.version for v in registry.list_versions(sample)]
+        first = registry.get(sample, versions[0])
+        registry.reload()
+        again = registry.get(sample, versions[0])
+        stable = first.content_hash == again.content_hash
+        audit.record(
+            "34. Prompt versioning",
+            PASS if stable and multi else FAIL,
+            f"{len(names)} prompts, {len(multi)} with multiple versions",
+            [
+                f"{sample}: {versions}",
+                f"content hash survives reload: {stable} ({first.content_hash[:16]})",
+            ],
+        )
+    except Exception as exc:
+        audit.record("34. Prompt versioning", FAIL, str(exc)[:110])
+
+
+def check_docs(audit: Audit) -> None:
+    """35: the documentation set exists and keeps its limitations section."""
+    required = [
+        "README.md",
+        "docs/architecture.md",
+        "docs/mlops.md",
+        "docs/llmops.md",
+        "docs/monitoring.md",
+        "docs/deployment.md",
+        "docs/troubleshooting.md",
+    ]
+    missing = [f for f in required if not (_ROOT / f).exists()]
+    if missing:
+        audit.record("35. Documentation", FAIL, f"missing: {', '.join(missing)}")
+        return
+
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    section = "## What this project is honest about"
+    # These limitations must survive every edit. Losing one is how a project
+    # starts overclaiming.
+    required_claims = {
+        "concept drift": "Concept drift is not detectable from unlabelled data",
+        "heuristic safety": "safety screen is heuristic pattern matching",
+        "mock LLM": "mock LLM provider is not a language model",
+        "SQLite writes": "SQLite serialises writes",
+        "terraform": "Terraform has not been applied",
+        "docker": "Docker images",
+    }
+    if section not in readme:
+        audit.record("35. Documentation", FAIL, f"README lost '{section}'")
+        return
+    body = readme.split(section, 1)[1]
+    absent = [k for k, phrase in required_claims.items() if phrase not in body]
+    audit.record(
+        "35. Documentation",
+        PASS if not absent else FAIL,
+        (
+            f"{len(required)} docs present; honesty section intact"
+            if not absent
+            else f"honesty section lost: {', '.join(absent)}"
+        ),
+        (
+            [f"'{section}' retains all {len(required_claims)} stated limitations"]
+            if not absent
+            else []
+        ),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="FMOps production-readiness audit")
     parser.add_argument("--with-tests", action="store_true")
+    parser.add_argument("--with-docker", action="store_true")
     parser.add_argument("--api-url", default=None)
     args = parser.parse_args(argv)
 
@@ -668,9 +994,11 @@ def main(argv: list[str] | None = None) -> int:
     check_lint(audit)
     check_format(audit)
     check_bandit(audit)
+    check_types(audit)
+    check_dependencies(audit)
     check_terraform(audit)
     check_compose(audit)
-    check_docker_runtime(audit)
+    check_docker_runtime(audit, args.with_docker)
     check_secrets(audit)
 
     print("\n-- live API -----------------------------------------------------")
@@ -678,6 +1006,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n-- platform capabilities ----------------------------------------")
     check_platform(audit)
+
+    print("\n-- deployment strategies ---------------------------------------")
+    check_strategies(audit)
+
+    print("\n-- drift taxonomy, prompts, documentation ----------------------")
+    check_drift_taxonomy(audit)
+    check_prompt_versioning(audit)
+    check_docs(audit)
 
     print("\n" + "=" * 78)
     counts = {

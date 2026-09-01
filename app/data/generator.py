@@ -19,6 +19,7 @@ Nothing here reads the network. ``make data`` regenerates every artifact.
 """
 
 from __future__ import annotations
+from collections.abc import Callable
 
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -515,7 +516,7 @@ def bootstrap_sample_data(force: bool = False) -> dict[str, Path]:
     raw = settings.paths.raw_dir
     reference = settings.paths.reference_dir
 
-    targets: dict[str, tuple[Path, callable]] = {
+    targets: dict[str, tuple[Path, Callable[[], pd.DataFrame]]] = {
         "train": (
             raw / "loan_default_v1.csv",
             lambda: build_training_dataset(),

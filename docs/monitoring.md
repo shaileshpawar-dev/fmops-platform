@@ -154,7 +154,7 @@ model-usage-by-version, LLM token consumption and estimated spend.
 
 ## Prometheus
 
-Scrape `/metrics`. Around 30 metric families:
+Scrape `/metrics`. 40 metric families (`curl -s localhost:8000/metrics | grep -c '^# HELP fmops_'`):
 
 ```
 fmops_predictions_total{model_name,model_version,variant,outcome}

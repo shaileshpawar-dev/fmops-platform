@@ -25,7 +25,7 @@ import traceback
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Literal
 
 # Default is None rather than {} so the sentinel is never shared or mutated;
 # every accessor materialises a fresh dict.
@@ -275,7 +275,7 @@ class StageTimer:
         self.logger.info("stage.start", extra={"stage": self.stage, **self.fields})
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         self.duration_ms = (time.perf_counter() - self.start) * 1000
         if exc_type is None:
             self.logger.info(

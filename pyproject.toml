@@ -182,7 +182,11 @@ exclude_lines = [
 # Typing / security
 # --------------------------------------------------------------------------- #
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin. Pinning it to the 3.11 floor while running on a newer
+# interpreter makes mypy parse that interpreter's bundled stubs under 3.11
+# rules, and it dies on numpy's `type` statements before checking any project
+# code. Ruff's target-version = "py311" is what actually enforces the floor;
+# mypy checks against whichever interpreter runs it.
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true

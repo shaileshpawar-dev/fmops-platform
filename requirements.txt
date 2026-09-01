@@ -39,3 +39,18 @@ psutil>=5.9
 # --- http ---
 httpx>=0.27
 requests>=2.32
+
+# --- known advisories in the resolved tree (checked, not ignored) ---
+# `pip-audit -r requirements.txt` reports two. Neither is remediable here:
+#
+#   cryptography 49.0.0 -- PYSEC-2026-3552 / CVE-2026-69247. Fixed in 50.0.0,
+#     but mlflow 3.15.2 requires cryptography<50, so pinning the fix breaks
+#     the dependency graph. The advisory is a distinguishable-outcome oracle
+#     in the PKCS7 decryption helpers; nothing in this repository calls them.
+#     Lift the floor as soon as mlflow relaxes its pin.
+#
+#   mlflow 3.15.2 -- CVE-2026-71211. No fixed version published. The flaw is
+#     unvalidated auth_config.api_base in the AI Gateway's secret handler
+#     (an SSRF shape). This platform uses MLflow only for tracking and the
+#     registry and never enables the AI Gateway; the compose stack's mlflow
+#     service does not expose it. Re-check when a fix ships.

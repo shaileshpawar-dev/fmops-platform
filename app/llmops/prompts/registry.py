@@ -45,7 +45,7 @@ _VARIABLE_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 def _version_key(version: str) -> tuple:
     """Sort key for semantic-ish versions; unparseable parts sort last."""
-    parts = []
+    parts: list[tuple[int, int | str]] = []
     for chunk in str(version).split("."):
         try:
             parts.append((0, int(chunk)))

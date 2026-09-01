@@ -300,9 +300,10 @@ class PredictionService:
         attribution, not SHAP: it is cheap enough to run inline and is labelled
         as approximate wherever it is surfaced.
         """
-        importance = (
-            {k: float(v) for k, v in (model.metrics.get("feature_importance") or {}).items()}
-            if isinstance(model.metrics.get("feature_importance"), dict)
+        raw_importance = model.metrics.get("feature_importance")
+        importance: dict[str, float] = (
+            {str(k): float(v) for k, v in raw_importance.items()}
+            if isinstance(raw_importance, dict)
             else {}
         )
         if not importance:

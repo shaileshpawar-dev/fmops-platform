@@ -10,6 +10,8 @@ role, SSO, environment). No key is ever read from configuration files.
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.core.exceptions import DependencyMissingError, LLMProviderError, LLMRateLimitError
 from app.core.logging import get_logger
 from app.llmops.providers.base import LLMProvider
@@ -71,7 +73,7 @@ class BedrockProvider(LLMProvider):
                 "bedrock requires at least one user message", provider=self.name
             )
 
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "modelId": model_id,
             "messages": messages,
             "inferenceConfig": {
