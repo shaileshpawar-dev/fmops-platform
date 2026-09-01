@@ -199,6 +199,10 @@ class MonitoringConfig(BaseModel):
     cloudwatch_enabled: bool = False
     cloudwatch_namespace: str = "FMOps"
     resource_sample_seconds: int = 15
+    # Counting open file descriptors enumerates every OS handle (~1.8s on
+    # Windows). Useful when hunting a descriptor leak, far too slow for a
+    # request path, so it is opt-in and only the background sampler uses it.
+    sample_open_files: bool = False
     latency_slo_ms: float = 250.0
     error_rate_slo: float = 0.02
     log_predictions: bool = True

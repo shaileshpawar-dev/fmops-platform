@@ -11,7 +11,7 @@ from app.core.logging import get_logger
 from app.monitoring.alerts import get_alert_manager
 from app.monitoring.drift import recent_drift_reports
 from app.monitoring.metrics import render_metrics
-from app.monitoring.resource_monitor import sample_resources
+from app.monitoring.resource_monitor import latest_resources, sample_resources
 from app.monitoring.service import get_monitoring_service
 from app.schemas.common import AlertCategory, Severity
 from app.schemas.evaluation import (
@@ -73,8 +73,17 @@ def live_performance(model_version: int | None = None) -> LivePerformance:
     response_model=ResourceUsage,
     summary="CPU / memory / disk / GPU",
 )
-def resources() -> ResourceUsage:
-    return sample_resources()
+def resources(
+    fresh: bool = Query(
+        default=False,
+        description=(
+            "Force a new sample instead of returning the background sampler's "
+            "most recent one. Slower; on Windows an open-file count alone can "
+            "cost seconds."
+        ),
+    ),
+) -> ResourceUsage:
+    return sample_resources() if fresh else latest_resources()
 
 
 @router.post("/api/v1/monitoring/watchdog", summary="Evaluate SLOs and raise alerts")

@@ -31,6 +31,8 @@ class ResourceMonitor:
         self._stop = threading.Event()
         self._gpu_checked = False
         self._gpu_available = False
+        self._latest: ResourceUsage | None = None
+        self._latest_lock = threading.Lock()
 
     @property
     def process(self):
@@ -57,6 +59,14 @@ class ResourceMonitor:
                 rss_mb = process.memory_info().rss / (1024 * 1024)
                 cpu = process.cpu_percent(interval=None)
                 threads = process.num_threads()
+
+            # open_files() enumerates every handle the OS knows about. On
+            # Windows that measured ~1.8s -- unacceptable on any path a request
+            # can reach, and it is a nice-to-have diagnostic rather than an
+            # operational signal. Off by default; enable it only on the
+            # background sampler when hunting a descriptor leak.
+            open_files = 0
+            if self.settings.monitoring.sample_open_files:
                 try:
                     open_files = len(process.open_files())
                 except (psutil.AccessDenied, OSError):
@@ -80,7 +90,34 @@ class ResourceMonitor:
             return ResourceUsage()
 
         self._export(usage)
+        with self._latest_lock:
+            self._latest = usage
         return usage
+
+    def latest(self, max_age_seconds: float | None = None) -> ResourceUsage:
+        """Return the most recent sample, taking one only if there is none.
+
+        Request paths use this rather than :meth:`sample`. Sampling costs real
+        syscalls, and a dashboard that polls every 15 seconds should read what
+        the background sampler already collected, not re-measure the host on
+        every request.
+        """
+        with self._latest_lock:
+            cached = self._latest
+
+        if cached is None:
+            return self.sample()
+
+        if max_age_seconds is not None:
+            from app.core.utils import parse_iso, utcnow
+
+            try:
+                age = (utcnow() - parse_iso(cached.sampled_at)).total_seconds()
+            except Exception:
+                age = 0.0
+            if age > max_age_seconds:
+                return self.sample()
+        return cached
 
     def _export(self, usage: ResourceUsage) -> None:
         metrics = get_metrics()
@@ -156,6 +193,11 @@ class ResourceMonitor:
             return
         self._stop.clear()
         interval = max(5, self.settings.monitoring.resource_sample_seconds)
+        # Prime the cache so the first request does not have to sample.
+        try:
+            self.sample()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("resource_monitor.initial_sample_failed", extra={"error": str(exc)})
 
         def _loop() -> None:
             while not self._stop.wait(interval):
@@ -189,4 +231,10 @@ def get_resource_monitor() -> ResourceMonitor:
 
 
 def sample_resources() -> ResourceUsage:
+    """Take a fresh sample. Use :func:`latest_resources` on request paths."""
     return get_resource_monitor().sample()
+
+
+def latest_resources(max_age_seconds: float | None = 60.0) -> ResourceUsage:
+    """The most recent sample, refreshed only if older than ``max_age_seconds``."""
+    return get_resource_monitor().latest(max_age_seconds)

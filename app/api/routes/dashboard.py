@@ -179,11 +179,15 @@ def _drift_section() -> dict[str, Any]:
 
 
 def _system_section() -> dict[str, Any]:
+    from app.monitoring.resource_monitor import latest_resources
     from app.monitoring.service import get_monitoring_service
 
+    # Call each collector exactly once. Going through summary() here would
+    # recompute service_metrics and live_performance a second and third time,
+    # which on a busy inference log is the most expensive thing on the page.
     service = get_monitoring_service()
     metrics = service.service_metrics(60)
-    resources = service.summary(60).resources
+    resources = latest_resources()
     performance = service.live_performance()
 
     return {
@@ -384,6 +388,9 @@ _PAGE = """<!doctype html>
     padding:5px 11px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500; }
   button:hover { border-color:var(--accent); }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .banner { display:none; background:var(--panel); border:1px solid var(--err);
+    border-left-width:3px; border-radius:8px; padding:10px 14px; margin-bottom:16px;
+    font-size:13px; }
 </style>
 </head>
 <body>
@@ -558,22 +565,68 @@ function alertCard(a) {
        :'<div class="sub">No alerts.</div>'}`, true);
 }
 
+// A failed poll must NOT blank the page. During a restart or a brief blip the
+// last good render stays on screen and a banner says the data is stale --
+// wiping the dashboard is both alarming and less useful than slightly old
+// numbers you can still read.
+let lastGoodAt = null;
+let lastHtml = null;
+
+function showStaleBanner(err) {
+  let banner = document.getElementById('stale');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'stale';
+    banner.className = 'banner';
+    document.querySelector('main').prepend(banner);
+  }
+  const since = lastGoodAt
+    ? `last successful update ${lastGoodAt.toLocaleTimeString()}`
+    : 'no data has loaded yet';
+  banner.innerHTML =
+    `<span class="pill err">stale</span> could not reach the API (${err}) — ${since}. Retrying…`;
+  banner.style.display = 'block';
+}
+
+function clearStaleBanner() {
+  const banner = document.getElementById('stale');
+  if (banner) banner.style.display = 'none';
+}
+
 async function load() {
   const grid = document.getElementById('grid');
   try {
     const r = await fetch('/api/v1/dashboard');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     const s = d.service;
     document.getElementById('env').innerHTML =
       `<b>${s.environment}</b> · v${s.version} · commit <code>${s.git_commit}</code>
        · deploy:${s.deployment_provider} · registry:${s.registry_backend}
        · llm:${s.llm_provider} · aws:${s.aws_enabled?'on':'off'}`;
+    lastGoodAt = new Date();
     document.getElementById('updated').textContent =
-      'updated ' + new Date().toLocaleTimeString();
-    grid.innerHTML = modelCard(d.model) + deployCard(d.deployment) + driftCard(d.drift)
+      'updated ' + lastGoodAt.toLocaleTimeString();
+    // Build the markup, then replace the DOM only if it actually changed.
+    // A dashboard that rebuilds seven cards every 15 seconds flickers, loses
+    // any text the reader had selected, and does a lot of layout work to show
+    // identical numbers.
+    const html = modelCard(d.model) + deployCard(d.deployment) + driftCard(d.drift)
       + systemCard(d.system) + llmCard(d.llm) + retrainCard(d.retraining) + alertCard(d.alerts);
+    if (html !== lastHtml) {
+      grid.innerHTML = html;
+      lastHtml = html;
+    }
+    clearStaleBanner();
   } catch (err) {
-    grid.innerHTML = `<div class="card"><h2>Error</h2><div class="err-box">${err}</div></div>`;
+    showStaleBanner(err);
+    if (!lastGoodAt) {
+      grid.innerHTML =
+        `<div class="card"><h2>Cannot reach the API</h2>
+         <div class="err-box">${err}</div>
+         <div class="note">Is the server running? Try
+         <code>fmops serve</code> or <code>make up</code>.</div></div>`;
+    }
   }
 }
 load();

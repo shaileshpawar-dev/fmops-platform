@@ -25,7 +25,7 @@ from app.monitoring.alerts import get_alert_manager
 from app.monitoring.drift import DriftDetector, latest_drift_report
 from app.monitoring.inference_log import get_inference_log
 from app.monitoring.metrics import set_live_performance
-from app.monitoring.resource_monitor import sample_resources
+from app.monitoring.resource_monitor import latest_resources
 from app.registry.base import ModelRegistry
 from app.registry.factory import get_registry
 from app.schemas.evaluation import (
@@ -272,7 +272,7 @@ class MonitoringService:
             model_version=version,
             model_stage=serving.stage.value if serving else None,
             service=self.service_metrics(window_minutes),
-            resources=sample_resources(),
+            resources=latest_resources(),
             live_performance=self.live_performance(version),
             prediction_positive_rate=stats.get("positive_rate"),
             latest_drift=latest_drift_report(model_name),
