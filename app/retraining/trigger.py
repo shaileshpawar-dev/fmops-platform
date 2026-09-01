@@ -33,7 +33,7 @@ from app.monitoring.inference_log import get_inference_log
 from app.monitoring.service import get_monitoring_service
 from app.registry.factory import get_registry
 from app.schemas.common import RetrainingStatus, RetrainingTrigger
-from app.schemas.evaluation import RetrainingEvent
+from app.schemas.evaluation import LivePerformance, RetrainingEvent
 
 logger = get_logger(__name__)
 
@@ -75,7 +75,15 @@ class RetrainingTriggerEvaluator:
             self._db = get_database()
         return self._db
 
-    def evaluate(self, force: bool = False) -> TriggerDecision:
+    def evaluate(
+        self, force: bool = False, live_performance: LivePerformance | None = None
+    ) -> TriggerDecision:
+        """Evaluate every configured trigger.
+
+        ``live_performance`` lets a caller that has already computed it for this
+        model version reuse it instead of paying for the join and the metrics a
+        second time. The decision is identical either way.
+        """
         config = self.settings.retraining
         model_name = self.settings.tracking.registered_model_name
         checks: list[dict[str, Any]] = []
@@ -156,7 +164,9 @@ class RetrainingTriggerEvaluator:
 
         # --- performance ----------------------------------------------------- #
         if "performance" in config.triggers:
-            decision = self._performance_check(model_name, config.performance_drop_tolerance)
+            decision = self._performance_check(
+                model_name, config.performance_drop_tolerance, live_performance
+            )
             checks.append(decision[0])
             if decision[1] is not None and fired is None:
                 fired = decision[1]
@@ -201,7 +211,10 @@ class RetrainingTriggerEvaluator:
         )
 
     def _performance_check(
-        self, model_name: str, tolerance: float
+        self,
+        model_name: str,
+        tolerance: float,
+        live: LivePerformance | None = None,
     ) -> tuple[dict[str, Any], TriggerDecision | None]:
         registry = get_registry()
         serving = registry.get_serving(model_name)
@@ -215,7 +228,12 @@ class RetrainingTriggerEvaluator:
                 None,
             )
 
-        live = get_monitoring_service().live_performance(serving.version)
+        # Computing live performance means a join over the inference log plus a
+        # handful of sklearn metrics. A caller that already has the value for
+        # this same model version (the dashboard renders it too) passes it in
+        # rather than paying for it twice in one request.
+        if live is None:
+            live = get_monitoring_service().live_performance(serving.version)
         if not live.available or live.roc_auc is None:
             return (
                 {
@@ -379,5 +397,7 @@ def get_event_store() -> RetrainingEventStore:
     return _STORE
 
 
-def evaluate_trigger(force: bool = False) -> TriggerDecision:
-    return RetrainingTriggerEvaluator().evaluate(force)
+def evaluate_trigger(
+    force: bool = False, live_performance: LivePerformance | None = None
+) -> TriggerDecision:
+    return RetrainingTriggerEvaluator().evaluate(force, live_performance)

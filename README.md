@@ -276,11 +276,18 @@ Being explicit about limits is part of the engineering, not a disclaimer.
 - **Terraform has not been applied against a live AWS account in this
   repository's tests**, because that would create billable resources. It is
   syntax-checked and `terraform validate`-ed in CI.
-- **The Docker images were authored but not built on the machine this was
-  developed on** (no Docker daemon available there). `docker compose config`
-  validates, and CI builds all three images, checks they do not run as root,
-  and probes the API container's health endpoint — so the build is verified
-  there rather than locally.
+- **The Docker images build and run; the full compose stack has not been run
+  end to end.** All three images were built locally (Docker Desktop 29.7.2),
+  all three run as uid 10001, and the training image was used to generate,
+  validate, train and promote a model into a shared volume that the API image
+  then served a real prediction from. What has *not* been exercised locally is
+  the multi-service compose stack (MLflow + Prometheus + Grafana together);
+  `docker compose config` validates it and CI builds all three images.
+- **SQLite WAL does not work on a Windows bind mount.** Mounting a host
+  directory into the container fails at startup with `disk I/O error`, because
+  WAL needs shared-memory mapping that the Windows bind-mount driver does not
+  provide. Compose uses named volumes, which work correctly; this only affects
+  ad-hoc `-v /host/path:/app/artifacts` runs on Windows.
 
 ---
 

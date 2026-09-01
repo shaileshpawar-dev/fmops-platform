@@ -45,14 +45,38 @@ def dashboard_data() -> dict[str, Any]:
         }
     }
 
+    # Live model quality is the single most expensive thing on this page (a
+    # join over the inference log plus sklearn metrics). Both the system panel
+    # and the retraining trigger need it for the same model version at the same
+    # instant, so compute it once here and hand the same value to both. This is
+    # de-duplication within one request, not a cache: nothing is retained
+    # between requests and the numbers are identical to computing it twice.
+    live = _safe_value(_live_performance, "live_performance")
+
     payload["model"] = _safe(_model_section, "model")
     payload["deployment"] = _safe(_deployment_section, "deployment")
     payload["drift"] = _safe(_drift_section, "drift")
-    payload["system"] = _safe(_system_section, "system")
+    payload["system"] = _safe(lambda: _system_section(live), "system")
     payload["llm"] = _safe(_llm_section, "llm")
-    payload["retraining"] = _safe(_retraining_section, "retraining")
+    payload["retraining"] = _safe(lambda: _retraining_section(live), "retraining")
     payload["alerts"] = _safe(_alerts_section, "alerts")
     return payload
+
+
+def _live_performance():
+    """Live quality for the serving version, computed once per request."""
+    from app.monitoring.service import get_monitoring_service
+
+    return get_monitoring_service().live_performance()
+
+
+def _safe_value(fn, name: str):
+    """Like :func:`_safe` but for a value the sections share; None on failure."""
+    try:
+        return fn()
+    except Exception as exc:
+        logger.warning("dashboard.section_failed", extra={"section": name, "error": str(exc)})
+        return None
 
 
 def _safe(fn, name: str) -> dict[str, Any]:
@@ -178,7 +202,7 @@ def _drift_section() -> dict[str, Any]:
     }
 
 
-def _system_section() -> dict[str, Any]:
+def _system_section(performance: Any = None) -> dict[str, Any]:
     from app.monitoring.resource_monitor import latest_resources
     from app.monitoring.service import get_monitoring_service
 
@@ -188,7 +212,8 @@ def _system_section() -> dict[str, Any]:
     service = get_monitoring_service()
     metrics = service.service_metrics(60)
     resources = latest_resources()
-    performance = service.live_performance()
+    if performance is None:
+        performance = service.live_performance()
 
     return {
         "available": True,
@@ -267,11 +292,11 @@ def _llm_section() -> dict[str, Any]:
     }
 
 
-def _retraining_section() -> dict[str, Any]:
+def _retraining_section(live_performance: Any = None) -> dict[str, Any]:
     from app.retraining.trigger import evaluate_trigger, get_event_store
 
     events = get_event_store().recent(5)
-    decision = evaluate_trigger()
+    decision = evaluate_trigger(live_performance=live_performance)
     return {
         "available": True,
         "would_trigger": decision.should_retrain,

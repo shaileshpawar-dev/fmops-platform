@@ -76,7 +76,11 @@ services:
     depends_on:
       mlflow:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "-lc"]
+    # NOT `-lc`. A login shell sources /etc/profile, which resets PATH and
+    # drops /opt/venv/bin -- the image's only Python with dependencies
+    # installed. `bash -lc "python ..."` inside this image fails with
+    # ModuleNotFoundError: No module named 'yaml'.
+    entrypoint: ["/bin/bash", "-c"]
     command: >
       "python -m app.cli data generate &&
        python -m pipelines.training_pipeline --promote --report /app/artifacts/reports/bootstrap.json &&

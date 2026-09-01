@@ -131,6 +131,22 @@ distribution, CPU, memory, process RSS, and GPU utilisation **only when a GPU is
 actually detected**. A dashboard full of 0% GPU is indistinguishable from an idle
 GPU, so absence is reported as `gpu_available: false`.
 
+**Sampling is done off the request path.** A background thread samples on
+`monitoring.resource_sample_seconds` (default 15s) and request handlers read the
+most recent sample via `latest_resources()`. Measuring the host synchronously on
+every request is the wrong shape: a dashboard polling every 15 seconds should
+read what the sampler already collected.
+
+**Open file descriptors are opt-in** (`monitoring.sample_open_files`, default
+`false`). `psutil.Process.open_files()` enumerates every handle the OS knows
+about — **measured at ~1.8s on Windows** — which is fine for a background
+diagnostic and completely unacceptable on a request path. Turn it on when you
+are hunting a descriptor leak, and expect the sampler to get slower:
+
+```bash
+FMOPS_MONITORING__SAMPLE_OPEN_FILES=true
+```
+
 ### Business / operational
 
 Request volume, per-version traffic split, predicted-positive rate,
