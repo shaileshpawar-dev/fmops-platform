@@ -63,18 +63,18 @@ output "model_package_group" {
 output "fmops_environment" {
   description = "FMOPS_* settings that point the platform at this infrastructure."
   value = {
-    FMOPS_ENV                          = var.environment == "prod" ? "production" : (var.environment == "staging" ? "staging" : "development")
-    FMOPS_AWS__ENABLED                 = "true"
-    FMOPS_AWS__REGION                  = var.aws_region
-    FMOPS_AWS__S3_BUCKET               = module.storage.artifact_bucket_name
-    FMOPS_AWS__S3_PREFIX               = "fmops/${var.environment}"
-    FMOPS_AWS__SAGEMAKER_ROLE_ARN      = module.compute.sagemaker_role_arn
-    FMOPS_AWS__SAGEMAKER_ENDPOINT_NAME = "${local.name_prefix}-endpoint"
-    FMOPS_AWS__BEDROCK_REGION          = var.aws_region
-    FMOPS_ALERTS__SNS_TOPIC_ARN        = module.observability.alerts_topic_arn
+    FMOPS_ENV                              = var.environment == "prod" ? "production" : (var.environment == "staging" ? "staging" : "development")
+    FMOPS_AWS__ENABLED                     = "true"
+    FMOPS_AWS__REGION                      = var.aws_region
+    FMOPS_AWS__S3_BUCKET                   = module.storage.artifact_bucket_name
+    FMOPS_AWS__S3_PREFIX                   = "fmops/${var.environment}"
+    FMOPS_AWS__SAGEMAKER_ROLE_ARN          = module.compute.sagemaker_role_arn
+    FMOPS_AWS__SAGEMAKER_ENDPOINT_NAME     = "${local.name_prefix}-endpoint"
+    FMOPS_AWS__BEDROCK_REGION              = var.aws_region
+    FMOPS_ALERTS__SNS_TOPIC_ARN            = module.observability.alerts_topic_arn
     FMOPS_MONITORING__CLOUDWATCH_ENABLED   = "true"
     FMOPS_MONITORING__CLOUDWATCH_NAMESPACE = module.observability.metric_namespace
-    FMOPS_DEPLOYMENT__ENDPOINT_NAME    = "${local.name_prefix}-endpoint"
+    FMOPS_DEPLOYMENT__ENDPOINT_NAME        = "${local.name_prefix}-endpoint"
   }
 }
 
@@ -82,16 +82,49 @@ output "fmops_env_exports" {
   description = "Shell-ready export statements. Usage: eval \"$(terraform output -raw fmops_env_exports)\""
   value = join("\n", [
     for k, v in {
-      FMOPS_ENV                          = var.environment == "prod" ? "production" : (var.environment == "staging" ? "staging" : "development")
-      FMOPS_AWS__ENABLED                 = "true"
-      FMOPS_AWS__REGION                  = var.aws_region
-      FMOPS_AWS__S3_BUCKET               = module.storage.artifact_bucket_name
-      FMOPS_AWS__S3_PREFIX               = "fmops/${var.environment}"
-      FMOPS_AWS__SAGEMAKER_ROLE_ARN      = module.compute.sagemaker_role_arn
-      FMOPS_AWS__SAGEMAKER_ENDPOINT_NAME = "${local.name_prefix}-endpoint"
-      FMOPS_ALERTS__SNS_TOPIC_ARN        = module.observability.alerts_topic_arn
+      FMOPS_ENV                            = var.environment == "prod" ? "production" : (var.environment == "staging" ? "staging" : "development")
+      FMOPS_AWS__ENABLED                   = "true"
+      FMOPS_AWS__REGION                    = var.aws_region
+      FMOPS_AWS__S3_BUCKET                 = module.storage.artifact_bucket_name
+      FMOPS_AWS__S3_PREFIX                 = "fmops/${var.environment}"
+      FMOPS_AWS__SAGEMAKER_ROLE_ARN        = module.compute.sagemaker_role_arn
+      FMOPS_AWS__SAGEMAKER_ENDPOINT_NAME   = "${local.name_prefix}-endpoint"
+      FMOPS_ALERTS__SNS_TOPIC_ARN          = module.observability.alerts_topic_arn
       FMOPS_MONITORING__CLOUDWATCH_ENABLED = "true"
-      FMOPS_DEPLOYMENT__ENDPOINT_NAME    = "${local.name_prefix}-endpoint"
+      FMOPS_DEPLOYMENT__ENDPOINT_NAME      = "${local.name_prefix}-endpoint"
     } : "export ${k}=${v}"
   ])
+}
+
+// --------------------------------------------------------------------------- //
+// ECS service (only present when enable_ecs_service is true)
+// --------------------------------------------------------------------------- //
+output "public_url" {
+  description = "Public base URL of the deployed API. HTTP only; no TLS certificate."
+  value       = var.enable_ecs_service ? module.ecs[0].alb_url : ""
+}
+
+output "alb_dns_name" {
+  description = "Load balancer DNS name."
+  value       = var.enable_ecs_service ? module.ecs[0].alb_dns_name : ""
+}
+
+output "ecs_cluster_name" {
+  description = "ECS cluster name."
+  value       = var.enable_ecs_service ? module.ecs[0].cluster_name : ""
+}
+
+output "ecs_service_name" {
+  description = "ECS service name."
+  value       = var.enable_ecs_service ? module.ecs[0].service_name : ""
+}
+
+output "ecs_log_group" {
+  description = "CloudWatch log group carrying container output."
+  value       = var.enable_ecs_service ? module.ecs[0].log_group_name : ""
+}
+
+output "ecs_target_group_arn" {
+  description = "Target group ARN, for querying target health."
+  value       = var.enable_ecs_service ? module.ecs[0].target_group_arn : ""
 }

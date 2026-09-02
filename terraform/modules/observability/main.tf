@@ -285,11 +285,11 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title  = "Drift detections"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Maximum"
-          period = 300
+          title   = "Drift detections"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stat    = "Maximum"
+          period  = 300
           metrics = [[local.metric_namespace, "DriftDetected"]]
         }
       },
@@ -318,11 +318,11 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title  = "Application errors"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Sum"
-          period = 300
+          title   = "Application errors"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stat    = "Sum"
+          period  = 300
           metrics = [[local.metric_namespace, "ApplicationErrors"]]
         }
       },

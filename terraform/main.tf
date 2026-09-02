@@ -84,46 +84,105 @@ locals {
 module "storage" {
   source = "./modules/storage"
 
-  name_prefix              = local.name_prefix
-  bucket_name              = local.artifact_bucket
-  enable_versioning        = var.enable_bucket_versioning
-  retention_days           = var.artifact_retention_days
-  force_destroy            = var.force_destroy_bucket
-  ecr_repositories         = var.ecr_repositories
-  ecr_image_retention      = var.ecr_image_retention_count
-  ecr_scan_on_push         = var.ecr_scan_on_push
-  tags                     = local.common_tags
+  name_prefix         = local.name_prefix
+  bucket_name         = local.artifact_bucket
+  enable_versioning   = var.enable_bucket_versioning
+  retention_days      = var.artifact_retention_days
+  force_destroy       = var.force_destroy_bucket
+  ecr_repositories    = var.ecr_repositories
+  ecr_image_retention = var.ecr_image_retention_count
+  ecr_scan_on_push    = var.ecr_scan_on_push
+  tags                = local.common_tags
 }
 
 module "observability" {
   source = "./modules/observability"
 
-  name_prefix                = local.name_prefix
-  environment                = var.environment
-  aws_region                 = var.aws_region
-  log_retention_days         = var.log_retention_days
-  alert_email                = var.alert_email
-  latency_threshold_ms       = var.latency_alarm_threshold_ms
-  error_rate_threshold       = var.error_rate_alarm_threshold
-  drift_threshold            = var.drift_alarm_threshold
-  sagemaker_endpoint_name    = "${local.name_prefix}-endpoint"
-  tags                       = local.common_tags
+  name_prefix             = local.name_prefix
+  environment             = var.environment
+  aws_region              = var.aws_region
+  log_retention_days      = var.log_retention_days
+  alert_email             = var.alert_email
+  latency_threshold_ms    = var.latency_alarm_threshold_ms
+  error_rate_threshold    = var.error_rate_alarm_threshold
+  drift_threshold         = var.drift_alarm_threshold
+  sagemaker_endpoint_name = "${local.name_prefix}-endpoint"
+  tags                    = local.common_tags
 }
 
 module "compute" {
   source = "./modules/compute"
 
-  name_prefix        = local.name_prefix
-  artifact_bucket    = module.storage.artifact_bucket_name
+  name_prefix         = local.name_prefix
+  artifact_bucket     = module.storage.artifact_bucket_name
   artifact_bucket_arn = module.storage.artifact_bucket_arn
   ecr_repository_arns = module.storage.ecr_repository_arns
-  enable_sagemaker   = var.enable_sagemaker
-  alerts_topic_arn   = module.observability.alerts_topic_arn
-  log_group_arns     = module.observability.log_group_arns
+  enable_sagemaker    = var.enable_sagemaker
+  alerts_topic_arn    = module.observability.alerts_topic_arn
+  log_group_arns      = module.observability.log_group_arns
+  aws_region          = var.aws_region
+  account_id          = local.account_id
+  partition           = local.partition
+  tags                = local.common_tags
+}
+
+// --------------------------------------------------------------------------- //
+// ECS Fargate service (optional; this is what serves the public URL)
+// --------------------------------------------------------------------------- //
+// FMOPS_ENV is "production" so the strict approval gates, JSON logging and
+// audit log all apply. The overrides below point the pluggable backends at
+// what is actually deployed: there is no SageMaker endpoint, no MLflow
+// tracking server and no Bedrock access in this stack, and claiming otherwise
+// by leaving the profile defaults in place would give a service that fails to
+// start rather than one that is honest about its shape.
+module "ecs" {
+  count  = var.enable_ecs_service ? 1 : 0
+  source = "./modules/ecs"
+
+  name_prefix        = local.name_prefix
   aws_region         = var.aws_region
-  account_id         = local.account_id
-  partition          = local.partition
-  tags               = local.common_tags
+  container_image    = var.container_image
+  task_cpu           = var.ecs_task_cpu
+  task_memory        = var.ecs_task_memory
+  desired_count      = var.ecs_desired_count
+  ingress_cidrs      = var.ecs_ingress_cidrs
+  log_retention_days = var.log_retention_days
+  execution_role_arn = module.compute.task_execution_role_arn
+  task_role_arn      = module.compute.inference_task_role_arn
+
+  container_environment = merge(
+    {
+      FMOPS_ENV        = "production"
+      FMOPS_LOG_FORMAT = "json"
+
+      # No SageMaker endpoint in this stack: route in process.
+      FMOPS_DEPLOYMENT__PROVIDER = "local"
+
+      # No MLflow tracking server in this stack: use the embedded SQLite store.
+      FMOPS_TRACKING__BACKEND          = "local"
+      FMOPS_TRACKING__REGISTRY_BACKEND = "local"
+
+      # Deterministic offline provider. Not a language model, and no Bedrock
+      # model access has been requested for this account.
+      FMOPS_LLM__PROVIDER = "mock"
+      FMOPS_LLM__MODEL    = "mock-small"
+
+      # One worker: the task has half a vCPU, and four would thrash.
+      FMOPS_SERVER__WORKERS      = "1"
+      FMOPS_SERVER__DOCS_ENABLED = "true"
+
+      # Custom CloudWatch metrics bill per metric per month. Container logs
+      # still ship via the awslogs driver.
+      FMOPS_MONITORING__CLOUDWATCH_ENABLED = "false"
+
+      FMOPS_AWS__ENABLED   = "true"
+      FMOPS_AWS__REGION    = var.aws_region
+      FMOPS_AWS__S3_BUCKET = module.storage.artifact_bucket_name
+    },
+    var.ecs_extra_environment
+  )
+
+  tags = local.common_tags
 }
 
 // --------------------------------------------------------------------------- //
@@ -165,8 +224,8 @@ data "aws_iam_policy_document" "github_assume_role" {
 resource "aws_iam_openid_connect_provider" "github" {
   count = var.github_repository != "" && var.github_oidc_provider_arn == "" ? 1 : 0
 
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
   // GitHub's OIDC endpoint uses a well-known root CA; AWS validates the chain.
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 
@@ -176,9 +235,9 @@ resource "aws_iam_openid_connect_provider" "github" {
 resource "aws_iam_role" "github_actions" {
   count = var.github_repository != "" ? 1 : 0
 
-  name               = "${local.name_prefix}-github-actions"
-  description        = "Assumed by GitHub Actions via OIDC to build, push and deploy."
-  assume_role_policy = data.aws_iam_policy_document.github_assume_role[0].json
+  name                 = "${local.name_prefix}-github-actions"
+  description          = "Assumed by GitHub Actions via OIDC to build, push and deploy."
+  assume_role_policy   = data.aws_iam_policy_document.github_assume_role[0].json
   max_session_duration = 3600
 
   tags = local.common_tags
@@ -189,9 +248,9 @@ data "aws_iam_policy_document" "github_actions" {
 
   // Push container images.
   statement {
-    sid     = "ECRAuth"
-    effect  = "Allow"
-    actions = ["ecr:GetAuthorizationToken"]
+    sid       = "ECRAuth"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
   }
 

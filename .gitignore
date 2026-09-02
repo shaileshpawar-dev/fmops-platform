@@ -87,6 +87,8 @@ data/versions.json
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+# Saved plans embed the resolved values of every variable, secrets included.
+*.tfplan
 crash.log
 crash.*.log
 backend.tf

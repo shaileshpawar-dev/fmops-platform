@@ -165,3 +165,53 @@ variable "cost_center" {
   type        = string
   default     = "ml-platform"
 }
+
+// --------------------------------------------------------------------------- //
+// ECS Fargate service
+// --------------------------------------------------------------------------- //
+variable "enable_ecs_service" {
+  description = <<-EOT
+    Create the VPC, ALB and Fargate service that serve the public URL.
+    This is the only part of the stack with a meaningful hourly cost: an ALB
+    is roughly USD 16-18/month and a 0.5 vCPU / 1 GB task about USD 15/month
+    in ap-south-1. Set to false to keep only ECR, S3 and IAM.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "container_image" {
+  description = "Image the ECS task runs. Set to the ECR tag pushed by the deploy."
+  type        = string
+  default     = ""
+}
+
+variable "ecs_task_cpu" {
+  description = "Fargate CPU units for the API task. 512 = 0.5 vCPU."
+  type        = string
+  default     = "512"
+}
+
+variable "ecs_task_memory" {
+  description = "Fargate memory (MiB) for the API task."
+  type        = string
+  default     = "1024"
+}
+
+variable "ecs_desired_count" {
+  description = "Number of API tasks. One for a portfolio deployment."
+  type        = number
+  default     = 1
+}
+
+variable "ecs_ingress_cidrs" {
+  description = "CIDRs allowed to reach the load balancer on port 80."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "ecs_extra_environment" {
+  description = "Additional container environment variables, merged last."
+  type        = map(string)
+  default     = {}
+}
