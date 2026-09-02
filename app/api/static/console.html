@@ -1,0 +1,1350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FMOps Platform — Console</title>
+<style>
+/* ---------------------------------------------------------------- tokens -- */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --panel-2:#fbfcfd; --ink:#11161d; --ink-2:#48525f;
+  --ink-3:#77818f; --line:#e2e6eb; --line-2:#eef1f4; --accent:#1f6feb; --accent-ink:#fff;
+  --ok:#1a7f45; --ok-bg:#e6f4ec; --warn:#8a5a00; --warn-bg:#fdf3e0;
+  --bad:#b3261e; --bad-bg:#fdeceb; --info:#0b5f8a; --info-bg:#e6f2f8;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --sidebar:248px; --radius:6px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d1117; --panel:#151b23; --panel-2:#1a212b; --ink:#e6edf3; --ink-2:#9fabb9;
+    --ink-3:#6e7d8d; --line:#262f3b; --line-2:#1e252f; --accent:#4b8ff7;
+    --ok:#4ac97e; --ok-bg:#11291d; --warn:#e3b341; --warn-bg:#2b2412;
+    --bad:#f0776c; --bad-bg:#2d1a18; --info:#58b6e8; --info-bg:#11242e;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d1117; --panel:#151b23; --panel-2:#1a212b; --ink:#e6edf3; --ink-2:#9fabb9;
+  --ink-3:#6e7d8d; --line:#262f3b; --line-2:#1e252f; --accent:#4b8ff7;
+  --ok:#4ac97e; --ok-bg:#11291d; --warn:#e3b341; --warn-bg:#2b2412;
+  --bad:#f0776c; --bad-bg:#2d1a18; --info:#58b6e8; --info-bg:#11242e;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 var(--sans);
+  -webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em}
+/* ---------------------------------------------------------------- layout -- */
+.app{display:grid;grid-template-columns:var(--sidebar) 1fr;min-height:100vh}
+.side{background:var(--panel);border-right:1px solid var(--line);display:flex;
+  flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+.brand{display:flex;align-items:center;gap:9px;padding:16px 18px;border-bottom:1px solid var(--line)}
+.brand b{font-size:14px;letter-spacing:-.02em}
+.brand small{display:block;color:var(--ink-3);font-size:10.5px;font-weight:500;letter-spacing:.04em}
+.logo{width:26px;height:26px;border-radius:6px;background:var(--accent);color:#fff;display:grid;
+  place-items:center;font-weight:700;font-size:12px;flex:none}
+nav{padding:10px 8px 24px}
+.navgrp{margin:14px 0 5px;padding:0 10px;font-size:10px;font-weight:700;letter-spacing:.08em;
+  color:var(--ink-3);text-transform:uppercase}
+.navlink{display:flex;align-items:center;gap:9px;padding:6.5px 10px;border-radius:var(--radius);
+  color:var(--ink-2);cursor:pointer;font-weight:500;border:1px solid transparent}
+.navlink:hover{background:var(--panel-2);color:var(--ink)}
+.navlink.on{background:var(--accent);color:var(--accent-ink);font-weight:600}
+.navlink.on .ico{opacity:1}
+.ico{width:15px;text-align:center;opacity:.75;font-size:12px;flex:none}
+.main{display:flex;flex-direction:column;min-width:0}
+.top{display:flex;align-items:center;gap:14px;padding:0 22px;height:52px;background:var(--panel);
+  border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
+.crumb{font-size:12px;color:var(--ink-3)}
+.spacer{flex:1}
+.content{padding:20px 22px 56px;max-width:1560px;width:100%}
+.phead{margin-bottom:16px}
+.phead h1{font-size:19px}
+.phead p{margin:3px 0 0;color:var(--ink-3);font-size:12.5px;max-width:70ch}
+/* --------------------------------------------------------------- pieces --- */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border:1px solid var(--line);
+  background:var(--panel);color:var(--ink-2);border-radius:var(--radius);cursor:pointer;
+  font:inherit;font-weight:500;font-size:12px}
+.btn:hover{background:var(--panel-2);color:var(--ink);border-color:var(--ink-3)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:14px}
+.card>header{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line-2)}
+.card>header h3{font-size:12.5px}
+.card>header .sub{color:var(--ink-3);font-size:11.5px;font-weight:400}
+.card .body{padding:14px}
+.card .body.flush{padding:0}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.g6{grid-template-columns:repeat(6,minmax(0,1fr))}
+@media(max-width:1300px){.g6{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){.g2,.g3,.g4,.g6{grid-template-columns:1fr}}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.kpi .k{font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.kpi .v{font-size:21px;font-weight:650;margin-top:5px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.kpi .m{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--ink-3);padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap;
+  background:var(--panel-2);position:sticky;top:0}
+td{padding:9px 14px;border-bottom:1px solid var(--line-2);vertical-align:top}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--panel-2)}
+.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:12px}
+.scroll{overflow-x:auto}
+.mono{font-family:var(--mono);font-size:11.5px}
+.dim{color:var(--ink-3)}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:20px;
+  font-size:11px;font-weight:600;white-space:nowrap}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.bad{background:var(--bad-bg);color:var(--bad)}
+.badge.warn{background:var(--warn-bg);color:var(--warn)}
+.badge.info{background:var(--info-bg);color:var(--info)}
+.badge.mute{background:var(--line-2);color:var(--ink-3)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.kv{display:grid;grid-template-columns:minmax(120px,auto) 1fr;gap:7px 16px;font-size:12.5px}
+.kv dt{color:var(--ink-3)}
+.kv dd{margin:0;font-weight:500;word-break:break-word}
+.note{background:var(--info-bg);border:1px solid color-mix(in srgb,var(--info) 25%,transparent);
+  border-radius:var(--radius);padding:10px 12px;font-size:12px;color:var(--ink-2)}
+.note b{color:var(--ink)}
+.state{padding:28px 16px;text-align:center;color:var(--ink-3);font-size:12.5px}
+.state .big{font-size:13px;color:var(--ink-2);font-weight:500;margin-bottom:6px}
+.sk{background:linear-gradient(90deg,var(--line-2) 25%,var(--line) 37%,var(--line-2) 63%);
+  background-size:400% 100%;animation:sh 1.3s ease infinite;border-radius:4px;height:11px}
+@keyframes sh{0%{background-position:100% 50%}100%{background-position:0 50%}}
+.bar{height:7px;background:var(--line-2);border-radius:4px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:4px}
+.bar>i.bad{background:var(--bad)}.bar>i.ok{background:var(--ok)}.bar>i.warn{background:var(--warn)}
+.toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:99}
+.toast{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:var(--radius);padding:10px 13px;font-size:12.5px;box-shadow:0 6px 20px rgba(0,0,0,.16);
+  max-width:340px;animation:tin .18s ease}
+.toast.ok{border-left-color:var(--ok)}.toast.bad{border-left-color:var(--bad)}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}}
+.modal{position:fixed;inset:0;background:rgba(4,8,14,.55);display:grid;place-items:center;z-index:120;padding:20px}
+.modal .box{background:var(--panel);border:1px solid var(--line);border-radius:9px;max-width:460px;width:100%}
+.modal .box h3{font-size:14px}
+input[type=text],input[type=password],select{width:100%;padding:7px 10px;border:1px solid var(--line);
+  border-radius:var(--radius);background:var(--bg);color:var(--ink);font:inherit;font-size:12.5px}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
+.step{border:1px solid var(--line);background:var(--panel-2);border-radius:var(--radius);
+  padding:6px 11px;font-size:11.5px;font-weight:550;white-space:nowrap}
+.step.on{border-color:var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.step.done{border-color:var(--ok);color:var(--ok)}
+.arw{color:var(--ink-3);font-size:11px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:14px;overflow-x:auto}
+.tab{padding:7px 13px;cursor:pointer;font-size:12.5px;font-weight:550;color:var(--ink-3);
+  border-bottom:2px solid transparent;white-space:nowrap}
+.tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+.burger{display:none}
+@media(max-width:1000px){
+  .app{grid-template-columns:1fr}
+  .side{position:fixed;left:0;top:0;width:var(--sidebar);z-index:60;transform:translateX(-100%);
+    transition:transform .18s ease;box-shadow:0 0 40px rgba(0,0,0,.3)}
+  .side.open{transform:none}
+  .burger{display:inline-flex}
+  .content{padding:16px 14px 48px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand">
+      <div class="logo">FM</div>
+      <div><b>FMOps Platform</b><small>OPERATIONS CONSOLE</small></div>
+    </div>
+    <nav id="nav"></nav>
+  </aside>
+  <div class="main">
+    <div class="top">
+      <button class="btn burger" id="burger" aria-label="Menu">☰</button>
+      <span class="crumb" id="crumb">Overview</span>
+      <span class="spacer"></span>
+      <span id="envbadge"></span>
+      <span id="healthbadge"></span>
+      <button class="btn" id="refresh" title="Reload this page's data">↻ Refresh</button>
+      <button class="btn" id="theme" title="Toggle theme">◐</button>
+    </div>
+    <div class="content" id="view"></div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+"use strict";
+/* =====================================================================
+   FMOps console. Vanilla JS, no build step, no external dependencies.
+   Every number rendered here comes from the FMOps API. When a value is
+   absent the UI says so -- it never substitutes a placeholder number.
+   ===================================================================== */
+
+/* ------------------------------------------------------------- utils --- */
+const $ = (s, r) => (r || document).querySelector(s);
+const h = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content; };
+function esc(v){ return String(v == null ? "" : v).replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+const NA = '<span class="dim">&mdash;</span>';
+function has(v){ return v !== null && v !== undefined && v !== ""; }
+function num(v, d){ if(!has(v) || typeof v !== "number" || !isFinite(v)) return NA;
+  return `<span class="mono">${v.toFixed(d === undefined ? 4 : d)}</span>`; }
+function int(v){ if(!has(v) || typeof v !== "number") return NA;
+  return `<span class="mono">${v.toLocaleString()}</span>`; }
+function pct(v, d){ if(!has(v) || typeof v !== "number") return NA;
+  return `<span class="mono">${(v * 100).toFixed(d === undefined ? 1 : d)}%</span>`; }
+function ms(v){ if(!has(v) || typeof v !== "number") return NA;
+  return `<span class="mono">${v.toFixed(1)} ms</span>`; }
+function usd(v){ if(!has(v) || typeof v !== "number") return NA;
+  return `<span class="mono">$${v.toFixed(v < 1 ? 6 : 2)}</span>`; }
+function when(v){ if(!has(v)) return NA;
+  const d = new Date(v); if(isNaN(d)) return `<span class="mono">${esc(v)}</span>`;
+  return `<span class="mono" title="${esc(v)}">${d.toISOString().slice(0,19).replace("T"," ")}</span>`; }
+function ago(v){ if(!has(v)) return ""; const d = new Date(v); if(isNaN(d)) return "";
+  const s = (Date.now() - d.getTime())/1000;
+  if(s < 60) return "just now"; if(s < 3600) return Math.floor(s/60)+"m ago";
+  if(s < 86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+
+function badge(text, kind, dot){
+  return `<span class="badge ${kind||"mute"}">${dot?'<i class="dot"></i>':""}${esc(text)}</span>`; }
+function boolBadge(v, tTrue, tFalse, invert){
+  if(!has(v)) return badge("unknown","mute");
+  const good = invert ? !v : !!v;
+  return badge(v ? (tTrue||"yes") : (tFalse||"no"), good ? "ok" : "bad", true); }
+
+function card(title, bodyHtml, opts){
+  const o = opts || {};
+  return `<section class="card">
+    <header><h3>${esc(title)}</h3>${o.sub?`<span class="sub">${esc(o.sub)}</span>`:""}
+      <span class="spacer"></span>${o.right||""}</header>
+    <div class="body ${o.flush?"flush":""}">${bodyHtml}</div></section>`; }
+
+function kpi(label, value, meta){
+  return `<div class="kpi"><div class="k">${esc(label)}</div>
+    <div class="v">${value}</div><div class="m">${meta||"&nbsp;"}</div></div>`; }
+
+function table(cols, rows, opts){
+  const o = opts || {};
+  if(!rows || !rows.length) return emptyState(o.empty || "No records.");
+  const head = cols.map(c => `<th${c.num?' class="num"':""}>${esc(c.label)}</th>`).join("");
+  const body = rows.map(r => "<tr>" + cols.map(c =>
+    `<td${c.num?' class="num"':""}>${c.render(r)}</td>`).join("") + "</tr>").join("");
+  return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`; }
+
+function emptyState(msg){ return `<div class="state"><div class="big">Nothing to show</div>${esc(msg)}</div>`; }
+function unavailable(reason){
+  return `<div class="state"><div class="big">Data unavailable</div>${esc(reason || "The backend did not return this section.")}</div>`; }
+function errorState(msg, retryId){
+  return `<div class="state"><div class="big">Unable to load data</div>
+    <div style="margin-bottom:10px">${esc(msg)}</div>
+    <button class="btn" data-retry="${esc(retryId||"")}">Retry</button></div>`; }
+function skeleton(n){ let s = ""; for(let i=0;i<(n||5);i++)
+  s += `<div class="sk" style="margin:9px 14px;width:${55+((i*17)%40)}%"></div>`; return `<div style="padding:8px 0">${s}</div>`; }
+
+/* horizontal bar list -- used for feature drift and token/model splits */
+function barList(items, opts){
+  const o = opts || {};
+  if(!items.length) return emptyState(o.empty || "No values.");
+  const max = o.max || Math.max(...items.map(i => Math.abs(i.value) || 0), o.threshold || 0) || 1;
+  return `<div style="display:grid;gap:8px">` + items.map(i => {
+    const w = Math.max(1, Math.min(100, (Math.abs(i.value)/max)*100));
+    const cls = i.bad ? "bad" : (i.good ? "ok" : "");
+    return `<div style="display:grid;grid-template-columns:minmax(120px,1.1fr) 3fr minmax(64px,auto) auto;
+      gap:10px;align-items:center">
+      <span class="mono" style="font-size:11.5px">${esc(i.label)}</span>
+      <div class="bar"><i class="${cls}" style="width:${w}%"></i></div>
+      <span class="num">${typeof i.value === "number" ? i.value.toFixed(4) : esc(i.value)}</span>
+      <span>${i.tag||""}</span></div>`; }).join("") + `</div>`; }
+
+/* minimal SVG line chart -- points only, no library */
+function lineChart(series, opts){
+  const o = opts || {}, W = o.width || 640, H = o.height || 130, P = 26;
+  const pts = series.filter(p => typeof p.y === "number" && isFinite(p.y));
+  if(pts.length < 2) return `<div class="state">${esc(o.empty || "Not enough data points to plot.")}</div>`;
+  const ys = pts.map(p => p.y), min = Math.min(...ys, 0), max = Math.max(...ys);
+  const span = (max - min) || 1;
+  const x = i => P + (i/(pts.length-1)) * (W - P - 8);
+  const y = v => H - P - ((v - min)/span) * (H - P - 12);
+  const d = pts.map((p,i) => `${i?"L":"M"}${x(i).toFixed(1)},${y(p.y).toFixed(1)}`).join(" ");
+  const area = d + ` L${x(pts.length-1).toFixed(1)},${H-P} L${x(0).toFixed(1)},${H-P} Z`;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img">
+    <line x1="${P}" y1="${H-P}" x2="${W-8}" y2="${H-P}" stroke="var(--line)"/>
+    <text x="2" y="14" font-size="9" fill="var(--ink-3)">${max.toFixed(o.dp===undefined?2:o.dp)}</text>
+    <text x="2" y="${H-P}" font-size="9" fill="var(--ink-3)">${min.toFixed(o.dp===undefined?2:o.dp)}</text>
+    <path d="${area}" fill="var(--accent)" opacity=".10"/>
+    <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.8"/>
+    ${pts.map((p,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(p.y).toFixed(1)}" r="2.2"
+       fill="var(--accent)"><title>${esc(p.x)}: ${p.y}</title></circle>`).join("")}
+  </svg>`; }
+
+/* -------------------------------------------------------------- api ----- */
+const api = (() => {
+  const cache = new Map();
+  async function raw(path, init){
+    const res = await fetch(path, Object.assign({ headers: { "Accept": "application/json" } }, init||{}));
+    const text = await res.text();
+    let body = null; try { body = text ? JSON.parse(text) : null; } catch(e){ body = text; }
+    if(!res.ok){
+      const msg = (body && body.error && body.error.message) || (typeof body === "string" ? body : "") ||
+        `HTTP ${res.status}`;
+      const err = new Error(msg); err.status = res.status; err.body = body; throw err;
+    }
+    return body;
+  }
+  return {
+    /* GET with a short TTL so switching pages does not re-hit the same
+       endpoint repeatedly. Stable data gets a longer TTL than live data. */
+    async get(path, ttlMs){
+      const ttl = ttlMs === undefined ? 8000 : ttlMs;
+      const hit = cache.get(path);
+      if(hit && ttl > 0 && (Date.now() - hit.t) < ttl) return hit.v;
+      const v = await raw(path);
+      cache.set(path, { t: Date.now(), v });
+      return v;
+    },
+    post(path, body, apiKey){
+      const headers = { "Content-Type": "application/json", "Accept": "application/json" };
+      if(apiKey) headers["X-API-Key"] = apiKey;
+      return raw(path, { method: "POST", headers, body: body ? JSON.stringify(body) : "{}" });
+    },
+    text(path){ return fetch(path).then(r => r.text()); },
+    bust(){ cache.clear(); }
+  };
+})();
+
+/* Load several endpoints at once; a failure on one does not sink the page. */
+async function loadAll(spec, ttl){
+  const keys = Object.keys(spec);
+  const out = {};
+  await Promise.all(keys.map(async k => {
+    try { out[k] = { ok: true, data: await api.get(spec[k], ttl) }; }
+    catch(e){ out[k] = { ok: false, error: e.message || String(e) }; }
+  }));
+  return out;
+}
+function sect(res, render, label){
+  if(!res) return unavailable();
+  if(!res.ok) return errorState(`${label||"Endpoint"}: ${res.error}`, location.hash);
+  return render(res.data);
+}
+
+/* ------------------------------------------------------------ toasts ---- */
+function toast(msg, kind){
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .25s";
+    setTimeout(() => el.remove(), 260); }, 4200);
+}
+
+/* --------------------------------------------------- guarded actions ---- */
+/* Write endpoints require an API key. The key is asked for per action, held
+   in a local variable for the duration of that one request, and never
+   written to localStorage, sessionStorage, a cookie or the URL. */
+function confirmAction(opts){
+  return new Promise(resolve => {
+    const m = document.createElement("div");
+    m.className = "modal";
+    m.innerHTML = `<div class="box">
+      <div class="body" style="padding:16px">
+        <h3>${esc(opts.title)}</h3>
+        <p style="color:var(--ink-2);margin:8px 0 12px;font-size:12.5px">${esc(opts.body)}</p>
+        ${opts.needsKey ? `<label style="font-size:11.5px;color:var(--ink-3)">API key (X-API-Key)</label>
+          <input type="password" id="ackey" autocomplete="off" placeholder="required for write actions">
+          <p style="font-size:11px;color:var(--ink-3);margin:6px 0 0">
+            Used for this request only. Not stored anywhere in the browser.</p>` : ""}
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+          <button class="btn" id="acno">Cancel</button>
+          <button class="btn ${opts.danger?"danger":"pri"}" id="acyes">${esc(opts.confirm||"Confirm")}</button>
+        </div>
+      </div></div>`;
+    document.body.appendChild(m);
+    const done = v => { m.remove(); resolve(v); };
+    $("#acno", m).onclick = () => done(null);
+    $("#acyes", m).onclick = () => done({ key: opts.needsKey ? ($("#ackey", m).value || "") : "" });
+    m.onclick = e => { if(e.target === m) done(null); };
+  });
+}
+async function runAction(opts){
+  const c = await confirmAction(opts);
+  if(!c) return;
+  if(opts.needsKey && !c.key){ toast("An API key is required for this action.", "bad"); return; }
+  try {
+    await api.post(opts.path, opts.payload, c.key);
+    api.bust();
+    toast(opts.success || "Action completed.", "ok");
+    render();
+  } catch(e){
+    toast((e.status === 401 || e.status === 403)
+      ? "Rejected: the API key was missing or not accepted."
+      : `Failed: ${e.message}`, "bad");
+  }
+}
+
+/* ------------------------------------------------------------- pages ---- */
+const PAGES = {};
+
+/* ---- Overview ---------------------------------------------------------- */
+PAGES.overview = {
+  title: "Overview",
+  intro: "Live state of the platform: the serving model, its deployment, drift, and system health. Every figure is read from the FMOps API.",
+  async render(){
+    const d = await api.get("/api/v1/dashboard", 5000);
+    const m = d.model || {}, dep = d.deployment || {}, dr = d.drift || {},
+          sys = d.system || {}, rt = d.retraining || {}, al = d.alerts || {}, svc = d.service || {};
+    const met = m.metrics || {};
+
+    const driftBadge = dr.available
+      ? (dr.drift_detected ? badge("Detected","bad",true) : badge("Stable","ok",true))
+      : badge("Unavailable","mute");
+    const health = (sys.latency_slo_met && sys.error_slo_met) ? badge("Within SLO","ok",true)
+      : badge("SLO breach","bad",true);
+
+    const kpis = `<div class="grid g6" style="margin-bottom:14px">
+      ${kpi("Registered models", int(m.total_versions), m.model_name ? esc(m.model_name) : "")}
+      ${kpi("Serving version", m.available ? `v${esc(m.current_version)}` : NA,
+            m.current_stage ? badge(m.current_stage, "info") : "")}
+      ${kpi("Deployment", dep.strategy ? esc(dep.strategy) : (dep.provider ? esc(dep.provider) : NA),
+            dep.health ? badge(dep.health, dep.health === "healthy" ? "ok" : "bad", true) : "")}
+      ${kpi("Predictions logged", int(sys.requests), "since process start")}
+      ${kpi("Drift", driftBadge, dr.available ? `score ${(dr.dataset_drift_score||0).toFixed(4)}` : "")}
+      ${kpi("Open alerts", int(al.open_count), health)}
+    </div>`;
+
+    const modelCard = card("Serving model", m.available ? `
+      <dl class="kv">
+        <dt>Model</dt><dd class="mono">${esc(m.model_name)}</dd>
+        <dt>Version / stage</dt><dd>v${esc(m.current_version)} &nbsp;${badge(m.current_stage,"info")}</dd>
+        <dt>Algorithm</dt><dd class="mono">${esc(m.algorithm)}</dd>
+        <dt>Dataset</dt><dd class="mono">${esc(m.dataset_version)}</dd>
+      </dl>
+      <div class="grid g3" style="margin-top:14px">
+        ${kpi("ROC-AUC", num(met.roc_auc))}
+        ${kpi("F1", num(met.f1))}
+        ${kpi("Accuracy", num(met.accuracy))}
+      </div>` : unavailable("No model is registered."), { right: `<a class="btn" href="#/models">Open registry</a>` });
+
+    const deployCard = card("Deployment", `
+      <dl class="kv">
+        <dt>Endpoint</dt><dd class="mono">${esc(dep.endpoint || "—")}</dd>
+        <dt>Provider</dt><dd>${badge(dep.provider || "unknown","info")}</dd>
+        <dt>Strategy</dt><dd>${dep.strategy ? badge(dep.strategy,"info") : NA}</dd>
+        <dt>State</dt><dd>${dep.state ? badge(dep.state,"info") : NA}</dd>
+        <dt>Health</dt><dd>${dep.health ? badge(dep.health, dep.health==="healthy"?"ok":"bad", true) : NA}</dd>
+      </dl>
+      ${Object.keys(dep.checks||{}).length ? `<div style="margin-top:12px">
+        <div class="k" style="font-size:10.5px;font-weight:700;letter-spacing:.06em;
+          text-transform:uppercase;color:var(--ink-3);margin-bottom:7px">Health checks</div>
+        <div style="display:grid;gap:5px">${Object.entries(dep.checks).map(([k,v]) =>
+          `<div style="display:flex;justify-content:space-between;align-items:center">
+            <span class="mono">${esc(k)}</span>${boolBadge(v,"pass","fail")}</div>`).join("")}</div>
+      </div>` : ""}`, { right: `<a class="btn" href="#/deployments">Details</a>` });
+
+    const driftCard = card("Drift", dr.available ? `
+      <div style="display:grid;gap:9px">
+        ${driftRow("Data drift", dr.dataset_drift_score, dr.threshold, dr.drift_detected)}
+        ${driftRow("Feature drift", (dr.drifted_features||[]).length,
+            (dr.feature_drift||[]).length, (dr.drifted_features||[]).length > 0, true)}
+        ${driftRow("Prediction drift", dr.prediction_drift_score, dr.threshold,
+            has(dr.prediction_drift_score) && dr.prediction_drift_score > dr.threshold)}
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span>Concept drift</span>${badge(dr.concept_drift_status || "unavailable",
+            dr.concept_drift_status === "measured" ? "info" : "mute")}</div>
+      </div>
+      ${dr.concept_drift_status !== "measured" ? `<div class="note" style="margin-top:12px">
+        <b>Concept drift is not computed from unlabelled data.</b><br>${esc(dr.concept_drift_detail||"")}</div>` : ""}`
+      : unavailable(dr.reason || "No drift report yet."), { right: `<a class="btn" href="#/drift">Details</a>` });
+
+    const rtCard = card("Retraining trigger", rt.available ? `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        ${rt.would_trigger ? badge("Would trigger","warn",true) : badge("No trigger","ok",true)}
+        ${rt.trigger ? badge(rt.trigger,"info") : ""}
+        ${rt.suppressed_by_cooldown ? badge("cooldown","mute") : ""}
+      </div>
+      <p style="margin:0;color:var(--ink-2);font-size:12.5px">${esc(rt.reason || "")}</p>`
+      : unavailable(), { right: `<a class="btn" href="#/retraining">Details</a>` });
+
+    const alerts = (al.alerts || []);
+    const alertCard = card("Open alerts", table([
+      { label:"Severity", render:a => badge(a.severity, a.severity==="critical"?"bad":a.severity==="warning"?"warn":"info") },
+      { label:"Title", render:a => esc(a.title) },
+      { label:"Category", render:a => `<span class="mono">${esc(a.category)}</span>` },
+      { label:"Raised", render:a => `${when(a.created_at)} <span class="dim">${ago(a.created_at)}</span>` },
+    ], alerts, { empty:"No open alerts." }), { flush:true, right:`<a class="btn" href="#/monitoring">Monitoring</a>` });
+
+    return kpis
+      + `<div class="grid g2">${modelCard}${deployCard}</div>`
+      + `<div class="grid g2">${driftCard}${rtCard}</div>`
+      + alertCard
+      + card("Platform configuration", `<dl class="kv">
+          <dt>Environment</dt><dd>${badge(svc.environment||"?","info")}</dd>
+          <dt>Version</dt><dd class="mono">${esc(svc.version)}</dd>
+          <dt>Deployment provider</dt><dd class="mono">${esc(svc.deployment_provider)}</dd>
+          <dt>Registry backend</dt><dd class="mono">${esc(svc.registry_backend)}</dd>
+          <dt>LLM provider</dt><dd class="mono">${esc(svc.llm_provider)}${
+            svc.llm_provider === "mock" ? " " + badge("offline mock — not a language model","warn") : ""}</dd>
+          <dt>AWS integration</dt><dd>${boolBadge(svc.aws_enabled,"enabled","disabled")}</dd>
+        </dl>`);
+  }
+};
+function driftRow(label, value, ref, bad, isCount){
+  const v = isCount ? `${value} / ${ref} features` :
+    (has(value) ? `<span class="mono">${Number(value).toFixed(4)}</span> <span class="dim">/ ${ref}</span>` : NA);
+  return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+    <span>${esc(label)}</span><span style="display:flex;gap:8px;align-items:center">${v}
+    ${bad ? badge("above threshold","bad") : badge("normal","ok")}</span></div>`;
+}
+
+/* ---- Models ------------------------------------------------------------ */
+PAGES.models = {
+  title: "Models",
+  intro: "Model registry. Versions, stages, offline evaluation metrics and the approval gate each version was measured against.",
+  async render(){
+    const r = await loadAll({ models:"/api/v1/models", dash:"/api/v1/dashboard" }, 8000);
+    const dash = r.dash.ok ? r.dash.data : {};
+    const m = dash.model || {}, th = m.thresholds || {}, met = m.metrics || {};
+    const versions = m.versions || [];
+
+    const gate = th.enabled ? card("Approval gate", `
+      <p class="dim" style="margin:0 0 10px">A candidate must clear every absolute threshold
+        <b>and</b> beat the incumbent on <span class="mono">${esc(th.comparison_metric)}</span>
+        by at least <span class="mono">${th.min_improvement}</span> before it can be promoted.</p>
+      <div class="grid g4">
+        ${kpi("Min F1", num(th.min_f1,2), gateMet(met.f1, th.min_f1))}
+        ${kpi("Min ROC-AUC", num(th.min_roc_auc,2), gateMet(met.roc_auc, th.min_roc_auc))}
+        ${kpi("Min precision", num(th.min_precision,2), gateMet(met.precision, th.min_precision))}
+        ${kpi("Max latency p95", ms(th.max_inference_latency_ms),
+              gateMet(th.max_inference_latency_ms, met.inference_latency_p95_ms))}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        ${boolBadge(th.require_clean_validation,"clean validation required","validation optional")}
+        ${boolBadge(th.require_manual_approval,"manual approval required","auto-promote allowed", true)}
+      </div>`) : "";
+
+    const detail = m.available ? card("Offline evaluation — serving version", `
+      <div class="grid g4">
+        ${kpi("Accuracy", num(met.accuracy))}${kpi("Precision", num(met.precision))}
+        ${kpi("Recall", num(met.recall))}${kpi("F1", num(met.f1))}
+      </div>
+      <div class="grid g4" style="margin-top:12px">
+        ${kpi("ROC-AUC", num(met.roc_auc))}${kpi("PR-AUC", num(met.pr_auc))}
+        ${kpi("Log loss", num(met.log_loss))}${kpi("Brier", num(met.brier_score))}
+      </div>
+      <div class="grid g3" style="margin-top:12px">
+        ${kpi("Latency p50", ms(met.inference_latency_p50_ms))}
+        ${kpi("Latency p95", ms(met.inference_latency_p95_ms))}
+        ${kpi("Eval samples", int(met.n_samples), `positive rate ${(met.positive_rate*100||0).toFixed(1)}%`)}
+      </div>
+      <div class="note" style="margin-top:14px">These are <b>offline</b> metrics from the held-out
+        evaluation set. Live quality requires ground-truth labels — see Monitoring.</div>`) : "";
+
+    const lifecycle = card("Model lifecycle", `<div class="flow">
+      <span class="step done">Registered</span><span class="arw">→</span>
+      <span class="step done">Evaluated</span><span class="arw">→</span>
+      <span class="step ${m.current_stage?"done":""}">Approved</span><span class="arw">→</span>
+      <span class="step ${m.current_stage==="Production"?"on":""}">Production</span>
+    </div>`);
+
+    const tbl = card("Registered versions", table([
+      { label:"Version", render:v => `<b class="mono">v${esc(v.version)}</b>` },
+      { label:"Stage", render:v => badge(v.stage || "None", v.stage==="Production"?"ok":v.stage==="Staging"?"info":"mute") },
+      { label:"Status", render:v => badge(v.status || "—","mute") },
+      { label:"ROC-AUC", num:true, render:v => num(v.roc_auc) },
+      { label:"F1", num:true, render:v => num(v.f1) },
+      { label:"Created", render:v => when(v.created_at) },
+      { label:"Actions", render:v => v.stage === "Production" ? `<span class="dim">serving</span>` :
+          `<button class="btn" data-act="promote" data-model="${esc(m.model_name)}" data-ver="${esc(v.version)}">Promote</button>` },
+    ], versions, { empty:"No versions registered." }), { flush:true,
+      sub: `${versions.length} version${versions.length===1?"":"s"}` });
+
+    return sect(r.models, () => "", "models") + tbl + detail + gate + lifecycle;
+  }
+};
+function gateMet(actual, threshold){
+  if(!has(actual) || !has(threshold)) return "";
+  return actual >= threshold ? badge("met","ok") : badge("not met","bad");
+}
+
+/* ---- Experiments ------------------------------------------------------- */
+PAGES.experiments = {
+  title: "Experiments",
+  intro: "Training runs recorded by the experiment tracker, with the parameters and metrics logged for each.",
+  async render(){
+    const r = await loadAll({ ex:"/api/v1/experiments", runs:"/api/v1/experiments/runs" }, 10000);
+    const exp = sect(r.ex, d => {
+      const list = d.experiments || [];
+      return card("Experiments", table([
+        { label:"Name", render:e => `<b class="mono">${esc(e.name || e.experiment_id || "—")}</b>` },
+        { label:"ID", render:e => `<span class="mono dim">${esc(e.experiment_id || "—")}</span>` },
+        { label:"Runs", num:true, render:e => int(e.run_count) },
+        { label:"Backend", render:() => badge(d.backend || "—","info") },
+      ], list, { empty:"No experiments recorded." }), { flush:true });
+    }, "experiments");
+
+    const runs = sect(r.runs, d => {
+      const list = d.runs || [];
+      return card("Runs", table([
+        { label:"Run", render:x => `<span class="mono">${esc(String(x.run_id||"").slice(0,16))}</span>` },
+        { label:"Status", render:x => badge(x.status || "—", x.status==="FINISHED"?"ok":"mute") },
+        { label:"Algorithm", render:x => `<span class="mono">${esc((x.params||{}).algorithm || "—")}</span>` },
+        { label:"ROC-AUC", num:true, render:x => num((x.metrics||{}).roc_auc) },
+        { label:"F1", num:true, render:x => num((x.metrics||{}).f1) },
+        { label:"Started", render:x => when(x.start_time) },
+      ], list, { empty:"No runs recorded yet. Runs appear here after the training pipeline executes." }),
+      { flush:true, sub: `${d.count || list.length} run(s) · experiment ${esc(d.experiment||"—")}` });
+    }, "runs");
+
+    return exp + runs + `<div class="note">The tracker backend in this deployment is
+      <b>local (SQLite)</b>. A shared MLflow tracking server is supported by configuration but is
+      not part of this deployment.</div>`;
+  }
+};
+
+/* ---- Deployments ------------------------------------------------------- */
+PAGES.deployments = {
+  title: "Deployments",
+  intro: "Deployment history and the current routing state, including the strategy in force and its traffic split.",
+  async render(){
+    const r = await loadAll({ list:"/api/v1/deployments", dash:"/api/v1/dashboard" }, 6000);
+    const dep = (r.dash.ok ? r.dash.data.deployment : {}) || {};
+    const traffic = dep.traffic || {};
+    const strat = (dep.strategy || "").toLowerCase();
+
+    let diagram = "";
+    if(strat === "canary" || Object.keys(traffic).length > 1){
+      diagram = Object.entries(traffic).map(([v,p]) =>
+        `<div style="display:grid;grid-template-columns:70px 1fr 56px;gap:10px;align-items:center;margin-bottom:7px">
+          <span class="mono">v${esc(v)}</span>
+          <div class="bar"><i style="width:${Number(p)||0}%"></i></div>
+          <span class="num">${Number(p)||0}%</span></div>`).join("");
+    } else if(strat === "blue_green"){
+      diagram = `<div class="flow" style="gap:14px">
+        <div><div class="dim" style="font-size:11px;margin-bottom:4px">Live (blue)</div>
+          <span class="step on">v${esc(dep.current_version ?? "—")}</span></div>
+        <span class="arw">↔</span>
+        <div><div class="dim" style="font-size:11px;margin-bottom:4px">Standby (green)</div>
+          <span class="step">v${esc(dep.candidate_version ?? dep.previous_version ?? "—")}</span></div></div>`;
+    } else if(strat === "shadow"){
+      diagram = `<div class="flow" style="gap:10px">
+        <span class="step">Production traffic</span><span class="arw">→</span>
+        <span class="step on">champion v${esc(dep.current_version ?? "—")}</span>
+        <span class="arw">⇢</span>
+        <span class="step">shadow v${esc(dep.shadow_version ?? "—")} <span class="dim">(not served)</span></span></div>`;
+    }
+
+    const current = card("Current routing", `
+      <dl class="kv">
+        <dt>Endpoint</dt><dd class="mono">${esc(dep.endpoint||"—")}</dd>
+        <dt>Provider</dt><dd>${badge(dep.provider||"—","info")}</dd>
+        <dt>Strategy</dt><dd>${dep.strategy?badge(dep.strategy,"info"):NA}</dd>
+        <dt>State</dt><dd>${dep.state?badge(dep.state,"info"):NA}</dd>
+        <dt>Serving</dt><dd>${has(dep.current_version)?`<b class="mono">v${esc(dep.current_version)}</b>`:NA}</dd>
+        <dt>Previous</dt><dd>${has(dep.previous_version)?`<span class="mono">v${esc(dep.previous_version)}</span>`:NA}</dd>
+        <dt>Rolled back</dt><dd>${boolBadge(dep.rolled_back,"yes","no",true)}</dd>
+      </dl>
+      ${diagram?`<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line-2)">${diagram}</div>`:""}`,
+      { right: has(dep.previous_version) ?
+        `<button class="btn danger" data-act="rollback">Roll back</button>` :
+        `<button class="btn" disabled title="No previous version to roll back to">Roll back</button>` });
+
+    const hist = sect(r.list, list => card("Deployment history", table([
+      { label:"ID", render:x => `<span class="mono">${esc(String(x.id).slice(0,12))}</span>` },
+      { label:"Model", render:x => `<span class="mono">${esc(x.model_name||"—")}</span>` },
+      { label:"Version", render:x => has(x.current_version)?`<b class="mono">v${esc(x.current_version)}</b>`:NA },
+      { label:"Strategy", render:x => badge(x.strategy||"—","info") },
+      { label:"State", render:x => badge(x.state||"—", x.state==="live"||x.state==="succeeded"?"ok":
+          x.state==="rolled_back"?"bad":"mute") },
+      { label:"Endpoint", render:x => `<span class="mono dim">${esc(x.endpoint_name||"—")}</span>` },
+      { label:"Started", render:x => when(x.created_at) },
+    ], list, { empty:"No deployments recorded." }), { flush:true, sub:`${list.length} record(s)` }), "deployments");
+
+    return current + hist + `<div class="note"><b>Local provider.</b> Routing is enforced
+      in-process by the API: a canary split genuinely routes that share of predictions. It does not
+      provision infrastructure — that is the SageMaker provider, which is not deployed here.</div>`;
+  }
+};
+
+/* ---- Monitoring -------------------------------------------------------- */
+PAGES.monitoring = {
+  title: "Monitoring",
+  intro: "Service throughput, latency against SLO, resource usage, live model quality, and open alerts.",
+  refresh: 15000,
+  async render(){
+    const r = await loadAll({ sum:"/api/v1/monitoring/summary", perf:"/api/v1/monitoring/performance",
+      res:"/api/v1/monitoring/resources", alerts:"/api/v1/alerts" }, 4000);
+
+    const svc = (r.sum.ok ? r.sum.data.service : {}) || {};
+    const inference = card("Inference", `<div class="grid g4">
+      ${kpi("Requests", int(svc.requests))}
+      ${kpi("Errors", int(svc.errors), has(svc.error_rate)?`rate ${(svc.error_rate*100).toFixed(2)}%`:"")}
+      ${kpi("Throughput", has(svc.throughput_rpm)?`<span class="mono">${svc.throughput_rpm.toFixed(1)}</span>`:NA,"req/min")}
+      ${kpi("Error SLO", has(svc.error_slo_met)?boolBadge(svc.error_slo_met,"met","breached"):NA,
+            has(svc.slo_error_rate)?`target ≤ ${(svc.slo_error_rate*100).toFixed(2)}%`:"")}
+    </div>`);
+
+    const latency = card("Latency", `<div class="grid g4">
+      ${kpi("p50", ms(svc.latency_p50_ms))}${kpi("p95", ms(svc.latency_p95_ms))}
+      ${kpi("p99", ms(svc.latency_p99_ms))}
+      ${kpi("Latency SLO", has(svc.latency_slo_met)?boolBadge(svc.latency_slo_met,"met","breached"):NA,
+            has(svc.slo_latency_ms)?`target ≤ ${svc.slo_latency_ms} ms`:"")}
+    </div>`);
+
+    const resources = sect(r.res, res => card("Resources", `<div class="grid g4">
+      ${kpi("CPU", has(res.cpu_percent)?`<span class="mono">${res.cpu_percent.toFixed(1)}%</span>`:NA)}
+      ${kpi("Memory", has(res.memory_percent)?`<span class="mono">${res.memory_percent.toFixed(1)}%</span>`:NA,
+            has(res.memory_used_mb)?`${res.memory_used_mb.toFixed(0)} / ${(res.memory_total_mb||0).toFixed(0)} MB`:"")}
+      ${kpi("Process RSS", has(res.process_rss_mb)?`<span class="mono">${res.process_rss_mb.toFixed(0)} MB</span>`:NA)}
+      ${kpi("GPU", res.gpu_available?badge("present","ok"):badge("none detected","mute"),
+            res.gpu_available?"":"reported as absent, not as 0%")}
+    </div>
+    <p class="dim" style="margin:12px 0 0;font-size:11.5px">Sampled on a background interval, not on
+      the request path.</p>`), "resources");
+
+    const live = sect(r.perf, p => card("Live model quality", p.available ? `<div class="grid g4">
+        ${kpi("Accuracy", num(p.accuracy))}${kpi("Precision", num(p.precision))}
+        ${kpi("Recall", num(p.recall))}${kpi("ROC-AUC", num(p.roc_auc))}
+      </div>
+      <p class="dim" style="margin:12px 0 0">Computed from ${int(p.labelled_samples)} labelled production rows.</p>`
+      : `<div class="state"><div class="big">Requires ground-truth labels</div>
+         ${esc(p.detail || "No labels submitted.")}</div>`), "performance");
+
+    const alerts = sect(r.alerts, list => card("Alerts", table([
+      { label:"Severity", render:a => badge(a.severity, a.severity==="critical"?"bad":a.severity==="warning"?"warn":"info") },
+      { label:"Title", render:a => esc(a.title) },
+      { label:"Category", render:a => `<span class="mono">${esc(a.category)}</span>` },
+      { label:"Message", render:a => `<span class="dim">${esc(String(a.message||"").slice(0,110))}</span>` },
+      { label:"Status", render:a => a.acknowledged?badge("acknowledged","mute"):badge("open","warn",true) },
+      { label:"Raised", render:a => when(a.created_at) },
+      { label:"", render:a => a.acknowledged?"":
+          `<button class="btn" data-act="ack" data-id="${esc(a.id)}">Acknowledge</button>` },
+    ], list, { empty:"No alerts raised." }), { flush:true }), "alerts");
+
+    return `<div class="grid g2">${inference}${latency}</div>` + resources + live + alerts;
+  }
+};
+
+/* ---- Drift ------------------------------------------------------------- */
+PAGES.drift = {
+  title: "Drift",
+  intro: "Data, feature and prediction drift measured against the training distribution. Concept drift is reported only when labels exist.",
+  async render(){
+    const r = await loadAll({ dash:"/api/v1/dashboard", reports:"/api/v1/drift" }, 6000);
+    const dr = (r.dash.ok ? r.dash.data.drift : {}) || {};
+    if(!dr.available) return unavailable(dr.reason || "No drift report has been produced yet.")
+      + `<div class="note" style="margin-top:14px">Run a scan from the API
+         (<span class="mono">POST /api/v1/drift/scan</span>) once enough production traffic has
+         been logged.</div>`;
+
+    const feats = (dr.feature_drift || []).slice().sort((a,b) =>
+      (b.drifted - a.drifted) || (b.score - a.score));
+
+    const summary = `<div class="grid g4" style="margin-bottom:14px">
+      ${kpi("Dataset drift", num(dr.dataset_drift_score),
+            dr.drift_detected?badge("detected","bad",true):badge("stable","ok",true))}
+      ${kpi("Prediction drift", num(dr.prediction_drift_score),
+            dr.prediction_drift_detected?badge("detected","bad",true):badge("normal","ok",true))}
+      ${kpi("Drifted features", `${(dr.drifted_features||[]).length} / ${feats.length}`,
+            `threshold ${dr.threshold}`)}
+      ${kpi("Concept drift", badge(dr.concept_drift_status||"unavailable",
+            dr.concept_drift_status==="measured"?"info":"mute"), `engine: ${esc(dr.engine||"—")}`)}
+    </div>`;
+
+    const conceptCard = card("Concept drift", `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <b>Status</b> ${badge(dr.concept_drift_status || "unavailable",
+          dr.concept_drift_status === "measured" ? "info" : "mute")}</div>
+      <p style="margin:0;color:var(--ink-2)">${esc(dr.concept_drift_detail || "")}</p>
+      ${dr.concept_drift_status !== "measured" ? `<div class="note" style="margin-top:12px">
+        Concept drift is a change in P(y|x) — what the inputs <i>mean</i>. It cannot be derived from
+        unlabelled inputs, because the inputs themselves need not change at all. This console shows
+        <b>no number</b> here rather than a proxy dressed up as a measurement.</div>`:""}`);
+
+    const featCard = card("Feature drift", barList(feats.map(f => ({
+      label: f.feature, value: f.score, bad: f.drifted,
+      tag: f.drifted ? badge("drifted","bad") : badge("stable","ok")
+    })), { threshold: dr.threshold, empty:"No per-feature results." }),
+    { sub:`PSI primary, ${esc(feats[0] ? feats[0].test : "—")} supporting · threshold ${dr.threshold}`,
+      flush:false });
+
+    const hist = (dr.history || []).slice().reverse();
+    const histCard = card("Drift score history", hist.length > 1
+      ? lineChart(hist.map(x => ({ x: x.created_at, y: x.score })), { dp:3 })
+      : emptyState("At least two scans are needed to plot a trend."),
+      { sub:`${hist.length} scan(s)` });
+
+    const reports = sect(r.reports, d => card("Scan history", table([
+      { label:"Scanned", render:x => `${when(x.created_at)} <span class="dim">${ago(x.created_at)}</span>` },
+      { label:"Detected", render:x => x.drift_detected?badge("yes","bad",true):badge("no","ok",true) },
+      { label:"Dataset score", num:true, render:x => num(x.dataset_drift_score) },
+      { label:"Prediction score", num:true, render:x => num(x.prediction_drift_score) },
+      { label:"Drifted", num:true, render:x => int((x.drifted_features||[]).length) },
+      { label:"Concept", render:x => badge(x.concept_drift_status||"—",
+          x.concept_drift_status==="measured"?"info":"mute") },
+    ], d.reports || [], { empty:"No scans recorded." }), { flush:true }), "drift reports");
+
+    return summary + `<div class="grid g2">${featCard}${conceptCard}</div>` + histCard + reports;
+  }
+};
+
+/* ---- Retraining -------------------------------------------------------- */
+PAGES.retraining = {
+  title: "Retraining",
+  intro: "The automated retraining loop: what would trigger it now, which checks fired, and the history of runs.",
+  async render(){
+    const r = await loadAll({ dash:"/api/v1/dashboard", events:"/api/v1/retraining" }, 6000);
+    const rt = (r.dash.ok ? r.dash.data.retraining : {}) || {};
+
+    const pipeline = card("Retraining pipeline", `<div class="flow">
+      ${["Drift / degradation","Trigger","Validation","Features","Training","Evaluation",
+         "Champion / challenger","Approval gate","Deployment"]
+        .map((s,i,a) => `<span class="step${i===0&&rt.would_trigger?" on":""}">${s}</span>` +
+          (i<a.length-1?'<span class="arw">→</span>':"")).join("")}
+    </div>
+    <p class="dim" style="margin:12px 0 0">A candidate that fails the approval gate is
+      <b>rejected</b> and production is left untouched.</p>`);
+
+    const status = card("Current trigger evaluation", rt.available ? `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        ${rt.would_trigger?badge("Would trigger now","warn",true):badge("No trigger","ok",true)}
+        ${rt.trigger?badge(rt.trigger,"info"):""}
+        ${rt.suppressed_by_cooldown?badge("suppressed by cooldown","mute"):""}
+      </div>
+      <p style="margin:0 0 12px;color:var(--ink-2)">${esc(rt.reason||"")}</p>
+      ${(rt.checks||[]).length ? `<div style="display:grid;gap:6px">${(rt.checks||[]).map(c =>
+        `<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+          <span class="mono">${esc(c.name)}</span>
+          <span style="display:flex;gap:8px;align-items:center;text-align:right">
+            <span class="dim" style="font-size:11.5px">${esc(c.detail||"")}</span>
+            ${c.fired?badge("fired","warn"):badge("quiet","mute")}</span></div>`).join("")}</div>`:""}`
+      : unavailable());
+
+    const events = sect(r.events, list => card("Retraining runs", table([
+      { label:"Run", render:x => `<span class="mono">${esc(String(x.id||"").slice(0,12))}</span>` },
+      { label:"Trigger", render:x => badge(x.trigger||"—","info") },
+      { label:"Status", render:x => badge(x.status||"—", x.status==="completed"?"ok":"mute") },
+      { label:"Decision", render:x => x.decision ?
+          badge(x.decision, x.decision==="promoted"?"ok":x.decision==="rejected"?"bad":"mute") : NA },
+      { label:"Model", render:x => `<span class="mono">${esc(x.model_name||"—")}</span>` },
+      { label:"Started", render:x => when(x.created_at) },
+    ], list, { empty:"No retraining runs recorded yet." }), { flush:true }), "retraining");
+
+    return status + pipeline + events;
+  }
+};
+
+/* ---- Champion / Challenger --------------------------------------------- */
+PAGES.champion = {
+  title: "Champion / Challenger",
+  intro: "Every candidate is compared against the incumbent. It is promoted only if it clears the absolute gate and beats the champion by the configured margin.",
+  async render(){
+    const d = await api.get("/api/v1/dashboard", 8000);
+    const m = d.model || {}, th = m.thresholds || {};
+    const vs = (m.versions || []).slice().sort((a,b) => Number(b.version) - Number(a.version));
+    const champ = vs.find(v => v.stage === "Production") || vs[vs.length-1];
+    const chall = vs.find(v => v !== champ && v.stage !== "Production");
+
+    const metric = th.comparison_metric || "roc_auc";
+    const minImp = has(th.min_improvement) ? th.min_improvement : null;
+
+    if(!champ) return unavailable("No registered versions to compare.");
+
+    if(!chall) return card("Comparison", `<div class="state">
+      <div class="big">No challenger registered</div>
+      Only one version exists (<span class="mono">v${esc(champ.version)}</span>, ${esc(champ.stage||"—")}).
+      A challenger appears here after the training or retraining pipeline registers a new candidate.</div>`)
+      + gateExplainer(th, metric, minImp)
+      + card("Champion", versionPanel(champ, "CHAMPION"));
+
+    const delta = (a,b) => (has(a) && has(b)) ? a - b : null;
+    const rows = [["ROC-AUC","roc_auc"],["F1","f1"]].map(([label,key]) => {
+      const c = champ[key], k = chall[key], dl = delta(k,c);
+      return { label, c, k, dl, decisive: key === metric };
+    });
+
+    const dMetric = delta(chall[metric], champ[metric]);
+    let verdict;
+    if(dMetric === null) verdict = badge("Not comparable — metric missing on one side","mute");
+    else if(minImp !== null && dMetric >= minImp)
+      verdict = badge(`PASS — challenger exceeds champion by ${dMetric.toFixed(4)} (≥ ${minImp})`,"ok",true);
+    else verdict = badge(`REJECTED — improvement ${dMetric.toFixed(4)} is below the required ${minImp}`,"bad",true);
+
+    const compare = card("Head to head", `
+      <div class="grid g2" style="margin-bottom:14px">
+        ${versionPanel(champ,"CHAMPION")}${versionPanel(chall,"CHALLENGER")}</div>
+      <div class="scroll"><table><thead><tr>
+        <th>Metric</th><th class="num">Champion v${esc(champ.version)}</th>
+        <th class="num">Challenger v${esc(chall.version)}</th><th class="num">Difference</th><th></th>
+      </tr></thead><tbody>${rows.map(r => `<tr>
+        <td>${esc(r.label)}${r.decisive?" "+badge("decisive","info"):""}</td>
+        <td class="num">${num(r.c)}</td><td class="num">${num(r.k)}</td>
+        <td class="num">${r.dl===null?NA:`<span class="mono" style="color:${r.dl>=0?"var(--ok)":"var(--bad)"}">
+          ${r.dl>=0?"+":""}${r.dl.toFixed(4)}</span>`}</td>
+        <td>${r.dl===null?"":(r.dl>=0?badge("better","ok"):badge("worse","bad"))}</td></tr>`).join("")}
+      </tbody></table></div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line-2)">
+        <div class="dim" style="font-size:11px;font-weight:700;letter-spacing:.06em;
+          text-transform:uppercase;margin-bottom:7px">Gate decision</div>${verdict}</div>`);
+
+    return compare + gateExplainer(th, metric, minImp);
+  }
+};
+function versionPanel(v, role){
+  return `<div class="kpi"><div class="k">${role}</div>
+    <div class="v">v${esc(v.version)}</div>
+    <div class="m">${badge(v.stage||"None", v.stage==="Production"?"ok":"mute")}
+      &nbsp;<span class="dim">${esc(v.status||"")}</span></div>
+    <div class="grid g2" style="margin-top:10px;gap:8px">
+      <div><div class="dim" style="font-size:10.5px">ROC-AUC</div>${num(v.roc_auc)}</div>
+      <div><div class="dim" style="font-size:10.5px">F1</div>${num(v.f1)}</div></div></div>`;
+}
+function gateExplainer(th, metric, minImp){
+  return card("How the gate decides", `<p style="margin:0 0 10px;color:var(--ink-2)">
+    Promotion requires <b>both</b> conditions. Clearing the absolute thresholds is not enough:
+    a candidate that is merely as good as the incumbent is rejected, which is what stops run-to-run
+    noise from churning the production model.</p>
+    <div class="flow" style="margin-bottom:12px">
+      <span class="step">Absolute thresholds</span><span class="arw">AND</span>
+      <span class="step">Beats champion on <span class="mono">${esc(metric)}</span>
+        by ≥ <span class="mono">${minImp === null ? "—" : minImp}</span></span>
+      <span class="arw">→</span><span class="step done">Promote</span></div>
+    <dl class="kv">
+      <dt>Comparison metric</dt><dd class="mono">${esc(metric)}</dd>
+      <dt>Minimum improvement</dt><dd class="mono">${minImp === null ? "—" : minImp}</dd>
+      <dt>Manual approval</dt><dd>${boolBadge(th.require_manual_approval,"required","not required",true)}</dd>
+    </dl>`);
+}
+
+/* ---- LLMOps ------------------------------------------------------------ */
+function mockNotice(prov){
+  if(prov !== "mock") return "";
+  return `<div class="note" style="margin-bottom:14px"><b>Provider: offline mock.</b>
+    The mock provider is deterministic and runs locally — it is <b>not a language model</b>.
+    Evaluation scores below measure the harness, not model quality, and cost is $0 because no
+    external API is called.</div>`;
+}
+
+PAGES["llm-overview"] = {
+  title: "LLMOps — Overview",
+  intro: "Provider, traffic, token consumption and spend for the foundation-model side of the platform.",
+  async render(){
+    const r = await loadAll({ dash:"/api/v1/dashboard", prov:"/api/v1/llm/providers",
+      tok:"/api/v1/llm/tokens", cost:"/api/v1/llm/cost" }, 8000);
+    const llm = (r.dash.ok ? r.dash.data.llm : {}) || {};
+    const t = (r.tok.ok ? r.tok.data.totals : {}) || {};
+
+    const head = `<div class="grid g6" style="margin-bottom:14px">
+      ${kpi("Provider", badge(llm.provider||"—", llm.is_mock?"warn":"info"),
+            llm.model?`<span class="mono">${esc(llm.model)}</span>`:"")}
+      ${kpi("Calls", int(llm.calls))}
+      ${kpi("Total tokens", int(llm.total_tokens))}
+      ${kpi("Avg latency", ms(llm.avg_latency_ms))}
+      ${kpi("Cost today", usd(llm.today_cost_usd), `month ${has(llm.month_cost_usd)?"$"+llm.month_cost_usd.toFixed(4):"—"}`)}
+      ${kpi("Error rate", pct(llm.error_rate,2))}
+    </div>`;
+
+    const budget = card("Budget", `<div class="grid g2">
+      <div><div class="dim" style="font-size:11px;margin-bottom:6px">Daily
+        (${has(llm.daily_budget_usd)?"$"+llm.daily_budget_usd:"—"})</div>
+        <div class="bar"><i class="${(llm.daily_budget_used_pct||0)>80?"bad":"ok"}"
+          style="width:${Math.min(100,llm.daily_budget_used_pct||0)}%"></i></div>
+        <div class="dim" style="margin-top:5px">${(llm.daily_budget_used_pct||0).toFixed(2)}% used</div></div>
+      <div><div class="dim" style="font-size:11px;margin-bottom:6px">Monthly</div>
+        <div class="bar"><i class="${(llm.monthly_budget_used_pct||0)>80?"bad":"ok"}"
+          style="width:${Math.min(100,llm.monthly_budget_used_pct||0)}%"></i></div>
+        <div class="dim" style="margin-top:5px">${(llm.monthly_budget_used_pct||0).toFixed(2)}% used</div></div>
+    </div>`);
+
+    const provs = sect(r.prov, d => card("Provider adapters", table([
+      { label:"Provider", render:([k]) => `<span class="mono">${esc(k)}</span>` +
+          (k === d.configured ? " " + badge("configured","info") : "") },
+      { label:"Available", render:([,v]) => boolBadge(v && v.available, "available","not configured") },
+      { label:"Detail", render:([,v]) => `<span class="dim">${esc((v && (v.detail || v.reason)) || "")}</span>` },
+    ], Object.entries(d.providers || {}), { empty:"No adapters reported." }),
+    { flush:true, sub:`configured: ${esc(d.configured||"—")}` }), "providers");
+
+    return mockNotice(llm.provider) + head + `<div class="grid g2">${budget}${
+      card("Token split", `<div class="grid g2">
+        ${kpi("Input", int(t.input_tokens ?? llm.input_tokens))}
+        ${kpi("Output", int(t.output_tokens ?? llm.output_tokens))}</div>
+      <div class="dim" style="margin-top:10px">Avg ${has(llm.avg_tokens_per_call)?
+        llm.avg_tokens_per_call.toFixed(1):"—"} tokens/call</div>`)}</div>` + provs;
+  }
+};
+
+PAGES["llm-prompts"] = {
+  title: "LLMOps — Prompts",
+  intro: "Versioned prompt registry. Each version is content-hashed, so a prompt change is a tracked, comparable event.",
+  async render(){
+    const r = await loadAll({ p:"/api/v1/llm/prompts", dash:"/api/v1/dashboard" }, 15000);
+    return sect(r.p, d => {
+      const entries = Object.entries(d.prompts || {});
+      if(!entries.length) return emptyState("No prompts registered.");
+      return entries.map(([name, info]) => {
+        const versions = info.versions || [];
+        return card(name, table([
+          { label:"Version", render:v => `<b class="mono">${esc(v.version||v)}</b>` +
+              ((info.latest === (v.version||v)) ? " " + badge("latest","ok") : "") },
+          { label:"Hash", render:v => v.content_hash ?
+              `<span class="mono dim">${esc(String(v.content_hash).slice(0,16))}</span>` : NA },
+          { label:"Variables", render:v => (v.variables||[]).length ?
+              (v.variables||[]).map(x => `<span class="mono">${esc(x)}</span>`).join(", ") : NA },
+          { label:"Description", render:v => `<span class="dim">${esc(v.description||"")}</span>` },
+        ], versions.map(v => typeof v === "string" ? { version:v } : v),
+          { empty:"No versions." }), { flush:true, sub:`latest ${esc(info.latest||"—")}` });
+      }).join("") + `<div class="note">Prompt bodies are served by
+        <span class="mono">GET /api/v1/llm/prompts/{name}/{version}</span>; a diff between two
+        versions is available at <span class="mono">/diff/{a}/{b}</span>.</div>`;
+    }, "prompts");
+  }
+};
+
+PAGES["llm-evals"] = {
+  title: "LLMOps — Evaluations",
+  intro: "Prompt and model evaluation runs, scored by the configured scorers.",
+  async render(){
+    const r = await loadAll({ e:"/api/v1/llm/evaluations", dash:"/api/v1/dashboard" }, 8000);
+    const llm = (r.dash.ok ? r.dash.data.llm : {}) || {};
+    return mockNotice(llm.provider) + sect(r.e, d => {
+      const evals = d.evaluations || [], sets = d.datasets || [];
+      return card("Evaluation runs", table([
+        { label:"ID", render:x => `<span class="mono">${esc(String(x.id||"").slice(0,12))}</span>` },
+        { label:"Suite", render:x => esc(x.suite||"—") },
+        { label:"Dataset", render:x => `<span class="mono">${esc(x.dataset||"—")}</span>` },
+        { label:"Prompt", render:x => `<span class="mono">${esc(x.prompt_version||x.prompt||"—")}</span>` },
+        { label:"Score", num:true, render:x => num(x.overall_score ?? x.overall) },
+        { label:"Cases", num:true, render:x => int(x.cases) },
+        { label:"Failed", num:true, render:x => int(x.failed) },
+        { label:"Tokens", num:true, render:x => int(x.total_tokens ?? x.tokens) },
+        { label:"When", render:x => when(x.created_at) },
+      ], evals, { empty:"No evaluation runs recorded. Trigger one with POST /api/v1/llm/evaluations/run." }),
+      { flush:true, sub:`${sets.length} dataset(s) available` });
+    }, "evaluations");
+  }
+};
+
+PAGES["llm-cost"] = {
+  title: "LLMOps — Tokens & Cost",
+  intro: "Token consumption and estimated spend. Costs are derived from token counts and a configured price table, not from a billing API.",
+  async render(){
+    const r = await loadAll({ tok:"/api/v1/llm/tokens", cost:"/api/v1/llm/cost", dash:"/api/v1/dashboard" }, 8000);
+    const llm = (r.dash.ok ? r.dash.data.llm : {}) || {};
+    const t = (r.tok.ok ? r.tok.data.totals : {}) || {};
+    const c = r.cost.ok ? r.cost.data : {};
+
+    const head = `<div class="grid g4" style="margin-bottom:14px">
+      ${kpi("Total tokens", int(t.total_tokens))}
+      ${kpi("Input", int(t.input_tokens))}
+      ${kpi("Output", int(t.output_tokens))}
+      ${kpi("Cost today", usd(c.today_cost_usd), `month ${has(c.month_cost_usd)?"$"+c.month_cost_usd.toFixed(6):"—"}`)}
+    </div>`;
+
+    const daily = (c.daily || []);
+    const costChart = card("Estimated cost, daily", daily.length > 1
+      ? lineChart(daily.map(x => ({ x: x.day || x.date, y: x.cost_usd ?? x.cost })), { dp:4 })
+      : emptyState("Not enough daily cost history to plot."), { sub:`${daily.length} day(s)` });
+
+    const byModel = card("By model", barList(Object.entries(c.by_model || {}).map(([k,v]) => ({
+      label:k, value: typeof v === "number" ? v : (v.cost_usd || 0),
+      tag: (typeof v === "object" && v.priced === false) ? badge("not priced","warn") : ""
+    })), { empty:"No per-model spend recorded." }));
+
+    const byPrompt = sect(r.tok, d => card("By prompt version", table([
+      { label:"Prompt", render:x => `<span class="mono">${esc(x.prompt_version||x.prompt||"—")}</span>` },
+      { label:"Calls", num:true, render:x => int(x.calls) },
+      { label:"Tokens", num:true, render:x => int(x.total_tokens ?? x.tokens) },
+      { label:"Cost", num:true, render:x => usd(x.cost_usd) },
+    ], d.by_prompt_version || [], { empty:"No prompt-level usage recorded yet." }), { flush:true }), "tokens");
+
+    return mockNotice(llm.provider) + head + costChart +
+      `<div class="grid g2">${byModel}${byPrompt}</div>` +
+      `<div class="note"><b>Cost figures are estimates.</b> They are computed from token counts and a
+        configured price table — this is not a billing system. A model with no price entry is flagged
+        rather than silently counted as $0.</div>`;
+  }
+};
+
+PAGES["llm-safety"] = {
+  title: "LLMOps — Safety",
+  intro: "The safety screen applied to model input and output, and an explicit statement of what it does and does not detect.",
+  async render(){
+    const d = await api.get("/api/v1/llm/safety/checks", 20000);
+    const checks = d.checks || [];
+    return card("Screening configuration", `<dl class="kv">
+        <dt>Enabled</dt><dd>${boolBadge(d.enabled,"enabled","disabled")}</dd>
+        <dt>Block on violation</dt><dd>${boolBadge(d.block_on_violation,"blocking","flag only")}</dd>
+        <dt>Active checks</dt><dd class="mono">${checks.length}</dd>
+      </dl>`)
+      + card("Checks", table([
+        { label:"Check", render:c => `<b class="mono">${esc(c.name || c.id || "—")}</b>` },
+        { label:"Severity", render:c => c.severity ? badge(c.severity,
+            c.severity==="critical"?"bad":c.severity==="high"?"warn":"info") : NA },
+        { label:"Blocking", render:c => has(c.blocking) ? boolBadge(c.blocking,"blocks","flags") : NA },
+        { label:"Description", render:c => `<span class="dim">${esc(c.description||"")}</span>` },
+      ], checks, { empty:"No checks configured." }), { flush:true })
+      + `<div class="note"><b>This is heuristic pattern matching, not a content-safety classifier.</b>
+        ${esc(d.limitations || "")} It cannot detect hallucination — only stylistic correlates of
+        unsupported claims — and its false-negative rate is unmeasured. A production system needs a
+        real moderation model in addition to this.</div>`;
+  }
+};
+
+/* ---- Audit ------------------------------------------------------------- */
+PAGES.audit = {
+  title: "Audit Logs",
+  intro: "Recorded platform actions: who did what, to which resource, and whether it succeeded.",
+  async render(){
+    const d = await api.get("/api/v1/audit", 6000);
+    const entries = d.entries || [];
+    const actions = [...new Set(entries.map(e => e.action).filter(Boolean))].sort();
+    const filter = `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+      <input type="text" id="auditq" placeholder="Filter by actor, action, resource or detail…"
+        style="max-width:340px">
+      <select id="auditact" style="max-width:200px"><option value="">All actions</option>
+        ${actions.map(a => `<option>${esc(a)}</option>`).join("")}</select>
+      <span class="dim" id="auditcount">${entries.length} entr${entries.length===1?"y":"ies"}</span></div>`;
+    window.__audit = entries;
+    return filter + `<div id="audittbl">${auditTable(entries)}</div>`;
+  }
+};
+function auditTable(rows){
+  return card("Audit trail", table([
+    { label:"Timestamp", render:e => when(e.created_at || e.timestamp) },
+    { label:"Actor", render:e => `<span class="mono">${esc(e.actor||"system")}</span>` },
+    { label:"Action", render:e => badge(e.action||"—","info") },
+    { label:"Resource", render:e => `<span class="mono">${esc(e.resource||"—")}</span>` },
+    { label:"Status", render:e => e.status ?
+        badge(e.status, /ok|success|200/i.test(String(e.status))?"ok":"bad") : NA },
+    { label:"Detail", render:e => `<span class="dim">${esc(String(e.detail||e.details||"").slice(0,140))}</span>` },
+  ], rows, { empty:"No audit entries recorded." }), { flush:true });
+}
+
+/* ---- System ------------------------------------------------------------ */
+PAGES.system = {
+  title: "System Health",
+  intro: "Process health, readiness, and the effective platform configuration. Secrets are never rendered here.",
+  async render(){
+    const r = await loadAll({ health:"/health", ready:"/health/ready", cfg:"/api/v1/config",
+      res:"/api/v1/monitoring/resources" }, 5000);
+
+    const health = sect(r.health, d => card("API health", `
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+        ${badge(d.status||"?", d.status==="healthy"?"ok":d.status==="degraded"?"warn":"bad", true)}
+        <span class="dim mono">${esc(d.service||"")} ${esc(d.version||"")}</span></div>
+      <div style="display:grid;gap:6px">${Object.entries(d.components||{}).map(([k,v]) =>
+        `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <span class="mono">${esc(k)}</span>
+          <span style="display:flex;gap:8px;align-items:center">
+            <span class="dim" style="font-size:11.5px">${esc(
+              Object.entries(v||{}).filter(([kk])=>kk!=="status")
+                .map(([kk,vv])=>`${kk}=${typeof vv==="object"?"…":vv}`).join(" · ").slice(0,90))}</span>
+            ${badge((v&&v.status)||"?", (v&&v.status)==="ok"?"ok":"bad")}</span></div>`).join("")}</div>`),
+      "health");
+
+    const ready = sect(r.ready, d => card("Readiness", `
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+        ${badge(d.status||"?", d.status==="ready"?"ok":"warn", true)}</div>
+      <div style="display:grid;gap:6px">${Object.entries(d.checks||{}).map(([k,v]) =>
+        `<div style="display:flex;justify-content:space-between"><span class="mono">${esc(k)}</span>
+         ${boolBadge(v,"ok","not ready")}</div>`).join("")}</div>
+      ${d.detail?`<div class="dim" style="margin-top:10px;font-size:11.5px">${esc(
+        Object.entries(d.detail).map(([k,v])=>`${k}: ${v}`).join(" · "))}</div>`:""}`), "readiness");
+
+    /* Only a safe, explicit allowlist of configuration is rendered. */
+    const cfg = sect(r.cfg, d => {
+      const safe = [
+        ["Environment", d.environment], ["Service", d.service_name], ["Version", d.version],
+        ["Log level", d.log_level], ["Log format", d.log_format], ["Git commit", d.git_commit],
+        ["Deployment provider", (d.deployment||{}).provider],
+        ["Deployment strategy", (d.deployment||{}).strategy],
+        ["Registry backend", (d.tracking||{}).registry_backend],
+        ["Tracking backend", (d.tracking||{}).backend],
+        ["Drift engine", (d.drift||{}).engine],
+        ["LLM provider", (d.llm||{}).provider], ["LLM model", (d.llm||{}).model],
+        ["AWS enabled", String((d.aws||{}).enabled)], ["AWS region", (d.aws||{}).region],
+        ["S3 bucket", (d.aws||{}).s3_bucket],
+        ["Auth backend", (d.security||{}).auth_backend],
+        ["CloudWatch", String((d.monitoring||{}).cloudwatch_enabled)],
+      ].filter(([,v]) => has(v));
+      return card("Platform configuration", `<dl class="kv">${safe.map(([k,v]) =>
+        `<dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd>`).join("")}</dl>
+        <div class="note" style="margin-top:12px">This view renders an explicit allowlist of
+        non-sensitive settings. API keys, AWS credentials and connection strings are never sent to
+        the browser.</div>`);
+    }, "config");
+
+    const infra = sect(r.cfg, d => {
+      const aws = d.aws || {};
+      const rows = [
+        ["AWS integration", aws.enabled ? badge("enabled","ok",true) : badge("disabled","mute"),
+          aws.enabled ? `region ${esc(aws.region||"—")}` : "adapters present, not active"],
+        ["S3 artifact bucket", aws.s3_bucket ? badge("configured","info") : badge("not configured","mute"),
+          aws.s3_bucket ? `<span class="mono">${esc(aws.s3_bucket)}</span>` : ""],
+        ["SageMaker endpoint", badge("not deployed","mute"),
+          "the deployment provider in this environment is the in-process router"],
+        ["CloudWatch metrics", (d.monitoring||{}).cloudwatch_enabled ?
+          badge("enabled","ok") : badge("disabled","mute"),
+          "container logs ship via the ECS awslogs driver regardless"],
+      ];
+      return card("Infrastructure", `<div style="display:grid;gap:9px">${rows.map(([k,b,note]) =>
+        `<div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
+          <span>${esc(k)}</span><span style="display:flex;gap:9px;align-items:center;text-align:right">
+          <span class="dim" style="font-size:11.5px">${note}</span>${b}</span></div>`).join("")}</div>
+        <div class="note" style="margin-top:12px">Status is read from the running service's own
+        configuration. It reflects what the application is set to use — it is not an independent
+        probe of each AWS service.</div>`);
+    }, "config");
+
+    const res = sect(r.res, d => card("Process resources", `<div class="grid g4">
+      ${kpi("CPU", has(d.cpu_percent)?`<span class="mono">${d.cpu_percent.toFixed(1)}%</span>`:NA)}
+      ${kpi("Memory", has(d.memory_percent)?`<span class="mono">${d.memory_percent.toFixed(1)}%</span>`:NA)}
+      ${kpi("RSS", has(d.process_rss_mb)?`<span class="mono">${d.process_rss_mb.toFixed(0)} MB</span>`:NA)}
+      ${kpi("GPU", d.gpu_available?badge("present","ok"):badge("none","mute"))}
+    </div>`), "resources");
+
+    return `<div class="grid g2">${health}${ready}</div>` + infra + cfg + res;
+  }
+};
+
+/* ------------------------------------------------------------- routes --- */
+const NAV = [
+  { group:null, items:[ ["overview","Overview","▤"] ] },
+  { group:"Model lifecycle", items:[ ["models","Models","◫"], ["experiments","Experiments","⌗"],
+      ["deployments","Deployments","⇪"] ] },
+  { group:"Observability", items:[ ["monitoring","Monitoring","◴"], ["drift","Drift","∿"],
+      ["retraining","Retraining","⟳"] ] },
+  { group:"Model governance", items:[ ["champion","Champion / Challenger","⚖"],
+      ["audit","Audit Logs","☰"] ] },
+  { group:"LLMOps", items:[ ["llm-overview","Overview","◇"], ["llm-prompts","Prompts","¶"],
+      ["llm-evals","Evaluations","✓"], ["llm-cost","Tokens & Cost","$"],
+      ["llm-safety","Safety","⛨"] ] },
+  { group:"System", items:[ ["system","System Health","♥"], ["__docs","API Docs","↗"] ] },
+];
+
+function buildNav(){
+  const cur = route();
+  $("#nav").innerHTML = NAV.map(sec =>
+    (sec.group ? `<div class="navgrp">${esc(sec.group)}</div>` : "") +
+    sec.items.map(([id,label,icon]) => id === "__docs"
+      ? `<a class="navlink" href="/docs" target="_blank" rel="noopener">
+           <span class="ico">${icon}</span>${esc(label)}</a>`
+      : `<a class="navlink ${id===cur?"on":""}" href="#/${id}">
+           <span class="ico">${icon}</span>${esc(label)}</a>`).join("")
+  ).join("");
+}
+function route(){
+  const r = (location.hash || "#/overview").replace(/^#\//,"").split("?")[0];
+  return PAGES[r] ? r : "overview";
+}
+
+let refreshTimer = null;
+async function render(){
+  const id = route(), page = PAGES[id];
+  buildNav();
+  $("#crumb").textContent = page.title;
+  document.title = `${page.title} · FMOps Platform`;
+  const view = $("#view");
+  view.innerHTML = `<div class="phead"><h1>${esc(page.title)}</h1>
+    <p>${esc(page.intro||"")}</p></div>` + skeleton(6);
+
+  if(refreshTimer){ clearInterval(refreshTimer); refreshTimer = null; }
+
+  let html;
+  try { html = await page.render(); }
+  catch(e){ html = errorState(e.message || String(e), id); }
+  if(route() !== id) return;                       // navigated away mid-load
+  view.innerHTML = `<div class="phead"><h1>${esc(page.title)}</h1>
+    <p>${esc(page.intro||"")}</p></div>` + html;
+
+  /* Auto-refresh only where it is genuinely useful, only while the tab is
+     visible, and never faster than the backend sampling interval. */
+  if(page.refresh){
+    refreshTimer = setInterval(() => {
+      if(document.visibilityState === "visible" && route() === id){ api.bust(); render(); }
+    }, page.refresh);
+  }
+  wirePage();
+}
+
+function wirePage(){
+  document.querySelectorAll("[data-retry]").forEach(b =>
+    b.onclick = () => { api.bust(); render(); });
+
+  const q = $("#auditq"), sel = $("#auditact");
+  if(q){
+    const apply = () => {
+      const term = (q.value||"").toLowerCase(), act = sel.value;
+      const rows = (window.__audit||[]).filter(e => {
+        if(act && e.action !== act) return false;
+        if(!term) return true;
+        return JSON.stringify(e).toLowerCase().includes(term);
+      });
+      $("#audittbl").innerHTML = auditTable(rows);
+      $("#auditcount").textContent = `${rows.length} of ${(window.__audit||[]).length} entries`;
+    };
+    q.oninput = apply; sel.onchange = apply;
+  }
+
+  const rb = document.querySelector('[data-act="rollback"]');
+  if(rb) rb.onclick = () => runAction({
+    title:"Roll back deployment",
+    body:"This restores the previous model version as the serving version. It changes what production traffic is scored by.",
+    confirm:"Roll back", danger:true, needsKey:true,
+    path:"/api/v1/deployments/rollback", payload:{ reason:"manual rollback from console" },
+    success:"Rollback requested." });
+
+  document.querySelectorAll('[data-act="promote"]').forEach(b => b.onclick = () => runAction({
+    title:`Promote v${b.dataset.ver} to Production`,
+    body:"The registry stage machine and the approval gate still apply — this request can be rejected by the backend.",
+    confirm:"Promote", needsKey:true,
+    path:`/api/v1/models/${encodeURIComponent(b.dataset.model)}/versions/${encodeURIComponent(b.dataset.ver)}/stage`,
+    payload:{ stage:"Production" }, success:"Stage transition requested." }));
+
+  document.querySelectorAll('[data-act="ack"]').forEach(b => b.onclick = () => runAction({
+    title:"Acknowledge alert",
+    body:"Marks this alert as acknowledged. It stays in the history.",
+    confirm:"Acknowledge", needsKey:true,
+    path:`/api/v1/alerts/${encodeURIComponent(b.dataset.id)}/acknowledge`,
+    success:"Alert acknowledged." }));
+}
+
+/* ------------------------------------------------------------- header --- */
+async function header(){
+  try {
+    const d = await api.get("/api/v1/dashboard", 20000);
+    const svc = d.service || {}, sys = d.system || {};
+    $("#envbadge").innerHTML = badge(String(svc.environment||"unknown").toUpperCase(), "info");
+    const ok = sys.latency_slo_met !== false && sys.error_slo_met !== false;
+    $("#healthbadge").innerHTML = badge(ok ? "Healthy" : "Degraded", ok ? "ok" : "warn", true);
+  } catch(e){
+    $("#envbadge").innerHTML = "";
+    $("#healthbadge").innerHTML = badge("API unreachable","bad",true);
+  }
+}
+
+/* --------------------------------------------------------------- boot --- */
+(function boot(){
+  const saved = localStorage.getItem("fmops-theme");   // a UI preference, not data
+  if(saved) document.documentElement.setAttribute("data-theme", saved);
+  $("#theme").onclick = () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    const next = cur === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("fmops-theme", next); } catch(e){ /* private mode */ }
+  };
+  $("#refresh").onclick = () => { api.bust(); render(); header(); toast("Reloaded."); };
+  $("#burger").onclick = () => $("#side").classList.toggle("open");
+  $("#nav").addEventListener("click", e => {
+    if(e.target.closest(".navlink")) $("#side").classList.remove("open"); });
+  window.addEventListener("hashchange", render);
+  if(!location.hash) location.hash = "#/overview";
+  render(); header();
+  setInterval(header, 30000);
+})();
+</script>
+</body>
+</html>

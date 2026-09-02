@@ -477,6 +477,64 @@ def test_dashboard_data_has_every_section(api_client):
     }
 
 
+def test_dashboard_console_has_every_navigation_section(api_client):
+    """The console must expose every area of the platform, not just a subset.
+
+    Checks both halves of the wiring: the page is registered in PAGES and it is
+    reachable from the sidebar. This is what catches a backend capability that
+    gets added and never surfaced, which is how a console quietly stops
+    representing the system it is meant to operate.
+    """
+    body = api_client.get("/dashboard").text
+    for page_id, label in (
+        ("overview", "Overview"),
+        ("models", "Models"),
+        ("experiments", "Experiments"),
+        ("deployments", "Deployments"),
+        ("monitoring", "Monitoring"),
+        ("drift", "Drift"),
+        ("retraining", "Retraining"),
+        ("champion", "Champion / Challenger"),
+        ("audit", "Audit Logs"),
+        ("llm-overview", "Overview"),
+        ("llm-prompts", "Prompts"),
+        ("llm-evals", "Evaluations"),
+        ("llm-cost", "Tokens & Cost"),
+        ("llm-safety", "Safety"),
+        ("system", "System Health"),
+    ):
+        registration = f"PAGES.{page_id} =" if "-" not in page_id else f'PAGES["{page_id}"] ='
+        assert registration in body, f"console has no page registered for {page_id}"
+        assert f'["{page_id}","{label}"' in body, f"sidebar has no entry for {page_id}"
+
+
+def test_dashboard_console_states_its_limitations(api_client):
+    """The console must not quietly drop the honesty the platform claims.
+
+    A UI is exactly where an unmeasurable number gets invented, so the two
+    claims that matter most are asserted here: that concept drift is not
+    derived from unlabelled data, and that the mock provider is not a language
+    model.
+    """
+    body = api_client.get("/dashboard").text
+    assert "not a language model" in body
+    assert "P(y|x)" in body
+    assert "not a content-safety classifier" in body
+    assert "estimates" in body
+
+
+def test_dashboard_console_ships_no_external_resources(api_client):
+    """No CDN, no third-party script or stylesheet.
+
+    The container has no guaranteed egress, and an external asset would make
+    the console fail open into a blank page in exactly the environment it is
+    meant to run in.
+    """
+    body = api_client.get("/dashboard").text
+    for marker in ("https://", "http://", "//cdn", "integrity="):
+        assert marker not in body, f"console references an external resource: {marker}"
+
+
 def test_retraining_trigger_endpoint(api_client):
     body = api_client.get("/api/v1/retraining/trigger/evaluate").json()
     assert "should_retrain" in body

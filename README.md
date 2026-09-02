@@ -61,7 +61,7 @@ extra steps.
 | **Retraining** | drift/performance/volume/schedule triggers with cooldown, automatic compare-and-decide |
 | **LLMOps** | 5 provider adapters behind one interface, versioned prompts, tracing, evaluation with A/B, heuristic safety screen, token and cost accounting with budgets |
 | **Infrastructure** | Terraform (S3, ECR, IAM, CloudWatch, SNS, SageMaker), 3 Docker images, Compose stack, 3 GitHub Actions workflows |
-| **Tests** | 220 tests: unit, API integration, and end-to-end lifecycle |
+| **Tests** | 223 tests: unit, API integration, and end-to-end lifecycle |
 
 ---
 
@@ -201,6 +201,48 @@ fmops aws status
 
 ---
 
+## Web console
+
+`GET /dashboard` serves a single-page operations console over the same API this
+README documents. It is the fastest way to see what the platform is doing.
+
+```
+Overview            serving model, deployment, drift, retraining, open alerts
+MODEL LIFECYCLE     Models · Experiments · Deployments
+OBSERVABILITY       Monitoring · Drift · Retraining
+MODEL GOVERNANCE    Champion / Challenger · Audit Logs
+LLMOPS              Overview · Prompts · Evaluations · Tokens & Cost · Safety
+SYSTEM              System Health · API Docs
+```
+
+Fifteen pages, all reading the live API. Notable ones:
+
+- **Champion / Challenger** shows the head-to-head that decides a promotion, and
+  states the verdict in the gate's own terms: a candidate is rejected when its
+  improvement falls below `min_improvement`, even if it clears every absolute
+  threshold.
+- **Drift** separates the three measurable drift types from concept drift, which
+  is reported as `unavailable` with the reason rather than as a number.
+- **LLMOps** labels the offline mock provider as not a language model wherever
+  its scores appear.
+
+Implementation notes:
+
+- One file, `app/api/static/console.html`. No build step, no framework, no CDN —
+  the container has no guaranteed egress, and an external asset would fail open
+  into a blank page in exactly the environment this runs in. A test asserts the
+  page references no external resources.
+- Reads are anonymous. The write actions (promote, roll back, acknowledge) ask
+  for an API key per action and hold it in a local variable for that one
+  request; it is never placed in `localStorage`, a cookie or the URL.
+- The System page renders an explicit allowlist of non-sensitive settings.
+  Credentials are never sent to the browser.
+- Where the backend has nothing to return, the page says `Data unavailable` or
+  names the reason. It does not substitute placeholder numbers.
+
+> Screenshots are not committed to this repository. Run `make dev` and open
+> <http://localhost:8000/dashboard>, or use the deployed URL in the AWS section.
+
 ## API
 
 60+ endpoints. The essentials:
@@ -303,7 +345,7 @@ make coverage
 | Suite | Count | Covers |
 |---|---|---|
 | `tests/unit` | 164 | validation, drift statistics, approval, stage machine, deployment strategies, rollback, preprocessing, evaluation, registry, LLM providers/prompts/cost/safety/scorers |
-| `tests/integration` | 39 | the real FastAPI app against a real database: prediction, batch, feedback, registry, deployment, monitoring, LLMOps, dashboard |
+| `tests/integration` | 42 | the real FastAPI app against a real database: prediction, batch, feedback, registry, deployment, monitoring, LLMOps, dashboard |
 | `tests/pipeline` | 17 | valid and invalid datasets, drift → trigger → retrain, **worse-model rejection**, better-model promotion, rollback, shadow |
 
 The negative tests carry the most weight: an invalid dataset must produce no

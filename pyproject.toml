@@ -84,6 +84,7 @@ include = ["app*", "pipelines*"]
 
 [tool.setuptools.package-data]
 "app.llmops.prompts" = ["library/*.yaml", "library/**/*.yaml"]
+"app.api" = ["static/*.html"]
 
 # --------------------------------------------------------------------------- #
 # Lint / format

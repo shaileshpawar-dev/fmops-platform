@@ -4,7 +4,7 @@
     {
       "name": "fmops-api",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "uvicorn", "app.api.main:app", "--host", "127.0.0.1", "--port", "8000", "--log-level", "warning"],
+      "runtimeArgs": ["-m", "uvicorn", "app.api.main:app", "--host", "127.0.0.1", "--port", "8000"],
       "port": 8000
     }
   ]
