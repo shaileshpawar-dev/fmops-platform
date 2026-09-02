@@ -53,6 +53,32 @@ Three images, deliberately separate:
 not ship the training, tuning or retraining code paths at all. Smaller attack
 surface, faster cold start.
 
+### Image tags
+
+**Images are referenced by commit SHA. There is no `:latest` tag, by design.**
+
+The ECR repositories are created with `IMMUTABLE` tag mutability, so a tag that
+has been pushed cannot be repointed at a new image. A moving tag therefore
+cannot be republished at all -- a second push is rejected by the registry and
+fails the pipeline.
+
+That is the mechanical reason. The operational one matters more: a moving tag
+makes the running revision ambiguous. `:latest` answers "what is deployed?"
+with "whatever was pushed most recently", which is not an answer you can roll
+back to. A commit SHA is.
+
+So:
+
+- `cd.yml` publishes exactly one tag per image, `sha-<short commit>`, and every
+  consumer -- the trivy scan, the ECS deploy, the SageMaker training image --
+  references it.
+- The Terraform `container_image` variable rejects `:latest` and other moving
+  tags with a validation rule, so a mutable reference cannot reach a task
+  definition even by hand.
+- Rolling back means pointing `container_image` at an earlier SHA and applying.
+  Every previously deployed image stays pullable by its own SHA tag, subject to
+  the ECR lifecycle policy (`ecr_image_retention_count`, default 5).
+
 All three are multi-stage (no build toolchain in the runtime layer), run as a
 non-root user, and declare a `HEALTHCHECK` against `/health/ready` — **readiness,
 not liveness**, so an orchestrator does not route traffic to a container that has

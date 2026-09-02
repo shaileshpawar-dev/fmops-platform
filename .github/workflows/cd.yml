@@ -73,6 +73,14 @@ jobs:
         name: Compute the image tag
         run: |
           # Tag by commit SHA: immutable, and traceable back to the exact code.
+          #
+          # This is the only tag the pipeline publishes. The ECR repositories are
+          # created with IMMUTABLE tag mutability, so a second push of a moving
+          # tag such as :latest is rejected by the registry and fails the run.
+          # A moving tag is also the wrong thing to deploy: it makes the running
+          # revision ambiguous and a rollback unrepeatable. Every consumer below
+          # -- the trivy scan, the ECS deploy and the SageMaker training image --
+          # references this tag.
           echo "image_tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------- #
@@ -105,7 +113,6 @@ jobs:
           push: true
           tags: |
             ${{ vars.ECR_REGISTRY }}/api:${{ needs.guard.outputs.image_tag }}
-            ${{ vars.ECR_REGISTRY }}/api:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -117,7 +124,6 @@ jobs:
           push: true
           tags: |
             ${{ vars.ECR_REGISTRY }}/training:${{ needs.guard.outputs.image_tag }}
-            ${{ vars.ECR_REGISTRY }}/training:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -129,7 +135,6 @@ jobs:
           push: true
           tags: |
             ${{ vars.ECR_REGISTRY }}/inference:${{ needs.guard.outputs.image_tag }}
-            ${{ vars.ECR_REGISTRY }}/inference:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

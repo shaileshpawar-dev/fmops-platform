@@ -181,9 +181,24 @@ variable "enable_ecs_service" {
 }
 
 variable "container_image" {
-  description = "Image the ECS task runs. Set to the ECR tag pushed by the deploy."
+  description = <<-EOT
+    Image the ECS task runs, as a commit-SHA tag or a @sha256 digest.
+
+    Must not be a moving tag. The ECR repositories are IMMUTABLE, so a tag
+    that has been pushed cannot be repointed -- but a moving tag would still
+    make the running revision ambiguous and a rollback unrepeatable, which is
+    the actual reason to refuse it here.
+  EOT
   type        = string
   default     = ""
+
+  validation {
+    condition = (
+      var.container_image == "" ||
+      !can(regex(":(latest|stable|main|master|prod|production)$", var.container_image))
+    )
+    error_message = "container_image must be a commit-SHA tag or a @sha256 digest, not a moving tag such as :latest."
+  }
 }
 
 variable "ecs_task_cpu" {
