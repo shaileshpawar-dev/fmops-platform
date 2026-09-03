@@ -489,6 +489,7 @@ def test_dashboard_console_has_every_navigation_section(api_client):
     for page_id, label in (
         ("overview", "Overview"),
         ("datasets", "Datasets"),
+        ("automl", "AutoML"),
         ("training", "Training"),
         ("evaluation", "Evaluation"),
         ("models", "Models"),

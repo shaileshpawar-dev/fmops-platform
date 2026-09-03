@@ -61,7 +61,7 @@ extra steps.
 | **Retraining** | drift/performance/volume/schedule triggers with cooldown, automatic compare-and-decide |
 | **LLMOps** | 5 provider adapters behind one interface, versioned prompts, tracing, evaluation with A/B, heuristic safety screen, token and cost accounting with budgets |
 | **Infrastructure** | Terraform (S3, ECR, IAM, CloudWatch, SNS, SageMaker), 3 Docker images, Compose stack, 3 GitHub Actions workflows |
-| **Tests** | 239 tests: unit, API integration, and end-to-end lifecycle |
+| **Tests** | 280 tests: unit, API integration, and end-to-end lifecycle |
 
 ---
 
@@ -208,7 +208,7 @@ README documents. It is the fastest way to see what the platform is doing.
 
 ```
 Overview            lifecycle status, serving model, deployment, drift, alerts
-DATA & TRAINING     Datasets · Training · Evaluation
+DATA & TRAINING     Datasets · AutoML · Training · Evaluation
 MODEL LIFECYCLE     Models · Experiments · Deployments
 OBSERVABILITY       Monitoring · Drift · Retraining
 MODEL GOVERNANCE    Champion / Challenger · Audit Logs
@@ -216,7 +216,11 @@ LLMOPS              Overview · Prompts · Evaluations · Tokens & Cost · Safet
 SYSTEM              System Health · API Docs
 ```
 
-Eighteen pages, all reading the live API. Notable ones:
+Nineteen pages, all reading the live API. Notable ones:
+
+- **AutoML** profiles a dataset, recommends a target and a problem type with
+  the evidence for each, proposes candidate models, trains them, and ranks
+  them on a leaderboard. The winner goes through the ordinary approval gate.
 
 - **Datasets** uploads a CSV, registers it as a content-addressed version and
   runs the platform's validation engine over it -- the same engine the training
@@ -268,6 +272,9 @@ GET  /api/v1/datasets/{v}/validation    the real validation engine
 GET  /api/v1/datasets/{v}/preview       bounded sample + column profile
 POST /api/v1/training/runs              202 + run id; poll for the outcome
 GET  /api/v1/training/runs/{run_id}
+GET  /api/v1/automl/profile/{v}          target + problem + candidate advice
+POST /api/v1/automl/runs                 candidate search, 202 + run id
+GET  /api/v1/automl/runs/{run_id}        leaderboard + gate outcome
 POST /api/v1/models/{name}/versions/{v}/stage
 POST /api/v1/models/{name}/versions/{v}/evaluate-gate
 GET  /api/v1/deployments/current
@@ -323,6 +330,15 @@ Being explicit about limits is part of the engineering, not a disclaimer.
 - **Local deployment is real routing, not real infrastructure.** A 90/10 canary
   genuinely routes ~10% of predictions. It does not provision instances — that is
   the SageMaker provider's job, and it is never presented as if it were.
+- **AutoML fits binary classification only.** The profiler detects regression
+  and multiclass targets and refuses them with a reason; it does not cast a
+  continuous target to an integer and report a meaningless ROC-AUC. Supporting
+  them would mean new estimators, metrics and preprocessing.
+- **AutoML recommendations are heuristics, not inference.** Target detection,
+  problem type and candidate ranking come from deterministic rules over dataset
+  properties, and every one is overridable. There is no model choosing models.
+- **Potential leakage is a name-based hint**, never a finding. A column called
+  `final_outcome` may be entirely legitimate.
 - **Cost figures are estimates** derived from token counts and a configured price
   table. Not a billing system. Unpriced models are flagged, not silently zeroed.
 - **SQLite serialises writes.** Fine for one API process; a multi-replica
@@ -358,8 +374,8 @@ make coverage
 
 | Suite | Count | Covers |
 |---|---|---|
-| `tests/unit` | 164 | validation, drift statistics, approval, stage machine, deployment strategies, rollback, preprocessing, evaluation, registry, LLM providers/prompts/cost/safety/scorers |
-| `tests/integration` | 58 | the real FastAPI app against a real database: prediction, batch, feedback, registry, deployment, monitoring, LLMOps, dashboard |
+| `tests/unit` | 192 | validation, drift statistics, approval, stage machine, deployment strategies, rollback, preprocessing, evaluation, registry, LLM providers/prompts/cost/safety/scorers |
+| `tests/integration` | 71 | the real FastAPI app against a real database: prediction, batch, feedback, registry, deployment, monitoring, LLMOps, dashboard |
 | `tests/pipeline` | 17 | valid and invalid datasets, drift → trigger → retrain, **worse-model rejection**, better-model promotion, rollback, shadow |
 
 The negative tests carry the most weight: an invalid dataset must produce no
@@ -418,6 +434,7 @@ Details and cost warnings: [`terraform/README.md`](terraform/README.md).
 | [`mlops.md`](docs/mlops.md) | training, versioning, registry, gates, retraining |
 | [`datasets.md`](docs/datasets.md) | upload, content-addressed versions, validation, preview |
 | [`training.md`](docs/training.md) | starting runs from the API, statuses, execution model |
+| [`automl.md`](docs/automl.md) | profiling, target inference, candidate ranking, the gate |
 | [`llmops.md`](docs/llmops.md) | prompts, providers, evaluation, **safety limitations**, cost |
 | [`monitoring.md`](docs/monitoring.md) | metrics, the drift taxonomy, statistics, SLOs |
 | [`deployment.md`](docs/deployment.md) | local, Docker, AWS, production checklist, security posture |
