@@ -175,9 +175,22 @@ module "ecs" {
       # still ship via the awslogs driver.
       FMOPS_MONITORING__CLOUDWATCH_ENABLED = "false"
 
-      FMOPS_AWS__ENABLED   = "true"
-      FMOPS_AWS__REGION    = var.aws_region
-      FMOPS_AWS__S3_BUCKET = module.storage.artifact_bucket_name
+      # AWS *service* integration is off, and that is not the same statement as
+      # "this is not running on AWS". The task runs on Fargate; the application
+      # does not call S3, SageMaker or Bedrock.
+      #
+      # It cannot: the api image does not ship boto3 (it lives in the [aws]
+      # extra) and the task role deliberately grants s3:GetObject on models/*
+      # but not PutObject. With enabled=true and a bucket set, the artifact
+      # store resolved to S3 and every training run died at persist_model after
+      # doing all the work -- validated, trained, evaluated, then no model.
+      #
+      # Declaring false makes the configuration true rather than aspirational,
+      # and the console reports it as such. Turning it on for real means adding
+      # boto3 to the runtime image and s3:PutObject under models/* to the task
+      # role -- both deliberate changes, not defaults.
+      FMOPS_AWS__ENABLED = "false"
+      FMOPS_AWS__REGION  = var.aws_region
     },
     var.ecs_extra_environment
   )
