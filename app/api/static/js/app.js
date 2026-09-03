@@ -1,0 +1,320 @@
+/* Sidebar structure. Every entry resolves to a page backed by a real API --
+   there are no placeholder destinations, because a nav item that goes nowhere
+   is worse than one that does not exist. Environments, Rollouts, Performance
+   and Settings are deliberately absent: the backend exposes no distinct data
+   for them, and the information they would show already lives in Deployments,
+   Monitoring and System Health. */
+const NAV = [
+  { group:"Overview", items:[ ["overview","Command Center","▤"] ] },
+  { group:"Model lifecycle", items:[
+      ["datasets","Datasets","▦"], ["automl","AutoML","✦"],
+      ["training","Training","⚙"], ["evaluation","Evaluation","◎"],
+      ["models","Model Registry","▫"] ] },
+  { group:"Deployment", items:[ ["deployments","Deployments","⇪"] ] },
+  { group:"Observability", items:[
+      ["monitoring","Monitoring","◴"], ["drift","Drift Detection","∿"],
+      ["retraining","Retraining","⟳"], ["experiments","Experiments","⌗"] ] },
+  { group:"Governance", items:[
+      ["champion","Champion / Challenger","⚖"], ["audit","Audit Log","☰"] ] },
+  { group:"LLMOps", items:[
+      ["llm-overview","Overview","◇"], ["llm-prompts","Prompts","¶"],
+      ["llm-evals","Evaluations","✓"], ["llm-cost","Tokens & Cost","$"],
+      ["llm-safety","Safety","⛨"] ] },
+  { group:"System", items:[ ["system","System Health","♥"], ["__docs","API Docs","↗"] ] },
+];
+
+function buildNav(){
+  const cur = route();
+  $("#nav").innerHTML = NAV.map(sec =>
+    (sec.group ? `<div class="navgrp">${esc(sec.group)}</div>` : "") +
+    sec.items.map(([id,label,icon]) => id === "__docs"
+      ? `<a class="navlink" href="/docs" target="_blank" rel="noopener">
+           <span class="ico">${icon}</span>${esc(label)}</a>`
+      : `<a class="navlink ${id===cur?"on":""}" href="#/${id}">
+           <span class="ico">${icon}</span>${esc(label)}</a>`).join("")
+  ).join("");
+}
+function route(){
+  const r = (location.hash || "#/overview").replace(/^#\//,"").split("?")[0];
+  return PAGES[r] ? r : "overview";
+}
+
+let refreshTimer = null;
+async function render(){
+  const id = route(), page = PAGES[id];
+  buildNav();
+  $("#crumb").textContent = page.title;
+  const sub = $("#crumbsub");
+  if(sub) sub.textContent = page.intro || "";
+  document.title = `${page.title} · FMOps Platform`;
+  const view = $("#main");
+  view.innerHTML = loadingPanel(page.title);
+
+  if(refreshTimer){ clearInterval(refreshTimer); refreshTimer = null; }
+
+  let html;
+  try { html = await page.render(); }
+  catch(e){ html = errorState(e.message || String(e), id); }
+  if(route() !== id) return;                       // navigated away mid-load
+  view.innerHTML = html;
+  stampRefresh();
+
+  /* Auto-refresh only where it is genuinely useful, only while the tab is
+     visible, and never faster than the backend sampling interval. */
+  if(page.refresh){
+    refreshTimer = setInterval(() => {
+      if(document.visibilityState === "visible" && route() === id){ api.bust(); render(); }
+    }, page.refresh);
+  }
+  wirePage();
+}
+
+
+/* A run in flight is the one thing worth following without a manual refresh.
+   Polls until the run reaches a terminal state, then stops -- there is nothing
+   further to learn, so continuing would be pure load. */
+function wirePage(){
+  document.querySelectorAll("[data-retry]").forEach(b =>
+    b.onclick = () => { api.bust(); render(); });
+
+  const q = $("#auditq"), sel = $("#auditact");
+  if(q){
+    const apply = () => {
+      const term = (q.value||"").toLowerCase(), act = sel.value;
+      const rows = (window.__audit||[]).filter(e => {
+        if(act && e.action !== act) return false;
+        if(!term) return true;
+        return JSON.stringify(e).toLowerCase().includes(term);
+      });
+      $("#audittbl").innerHTML = auditTable(rows);
+      $("#auditcount").textContent = `${rows.length} of ${(window.__audit||[]).length} entries`;
+    };
+    q.oninput = apply; sel.onchange = apply;
+  }
+
+  /* ---- Datasets: upload, validate, preview ----------------------------- */
+  const up = $("#dsupload");
+  if(up) up.onclick = async () => {
+    const input = $("#dsfile");
+    const file = input && input.files && input.files[0];
+    if(!file){ toast("Choose a CSV file first.", "bad"); return; }
+    if(!/\.csv$/i.test(file.name)){ toast("Only .csv files are accepted.", "bad"); return; }
+
+    const needsKey = await authRequired();
+    const proceed = await confirmAction({
+      title: "Upload dataset",
+      body: `Register ${file.name} (${(file.size/1024).toFixed(0)} KB) as a new dataset version and validate it.`,
+      confirm: "Upload", needsKey,
+    });
+    if(!proceed) return;
+    if(needsKey && !proceed.key){ toast("An API key is required to upload.", "bad"); return; }
+
+    up.disabled = true; up.textContent = "Uploading...";
+    const desc = ($("#dsdesc") && $("#dsdesc").value) || "";
+    const qs = `?filename=${encodeURIComponent(file.name)}&description=${encodeURIComponent(desc)}`;
+    try {
+      const res = await fetch("/api/v1/datasets/upload" + qs, {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "text/csv" },
+                               proceed.key ? { "X-API-Key": proceed.key } : {}),
+        body: file,
+      });
+      const body = await res.json();
+      if(!res.ok){
+        const msg = (body.error && body.error.message) || `HTTP ${res.status}`;
+        $("#dsresult").innerHTML = `<div class="note" style="border-color:var(--bad);
+          background:var(--bad-bg)"><b>Upload rejected.</b><br>${esc(msg)}</div>`;
+        toast("Upload rejected: " + msg, "bad");
+        return;
+      }
+      api.bust();
+      toast(`Registered ${body.version} (${body.rows} rows).`, "ok");
+      $("#dsresult").innerHTML =
+        `<div class="note"><b>Registered ${esc(body.version)}</b> &mdash; ${body.rows} rows,
+          ${body.columns} columns.</div>` +
+        (body.validation ? renderValidation(body.validation) : "");
+    } catch(e){
+      toast("Upload failed: " + e.message, "bad");
+    } finally {
+      up.disabled = false; up.textContent = "Upload and validate";
+    }
+  };
+
+  document.querySelectorAll('[data-act="ds-validate"]').forEach(b => b.onclick = async () => {
+    const target = $("#dsdetail");
+    b.disabled = true; b.textContent = "Validating...";
+    target.innerHTML = card("Validation", skeleton(4), { flush:true });
+    try {
+      const v = await api.get(`/api/v1/datasets/${encodeURIComponent(b.dataset.v)}/validation`, 0);
+      target.innerHTML = card(`Validation - ${esc(b.dataset.v)}`, renderValidation(v));
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("Validation", errorState(e.message, location.hash));
+    } finally { b.disabled = false; b.textContent = "Validate"; }
+  });
+
+  document.querySelectorAll('[data-act="ds-preview"]').forEach(b => b.onclick = async () => {
+    const target = $("#dsdetail");
+    b.disabled = true; b.textContent = "Loading...";
+    target.innerHTML = card("Preview", skeleton(4), { flush:true });
+    try {
+      const p = await api.get(`/api/v1/datasets/${encodeURIComponent(b.dataset.v)}/preview?rows=15`, 0);
+      target.innerHTML = renderPreview(p);
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("Preview", errorState(e.message, location.hash));
+    } finally { b.disabled = false; b.textContent = "Preview"; }
+  });
+
+  /* ---- Training: start a run, then poll it ----------------------------- */
+  const start = $("#trstart");
+  if(start) start.onclick = async () => {
+    const stage = $("#trstage").value;
+    const payload = {
+      dataset_version: $("#trds").value || null,
+      algorithm: $("#tralgo").value || null,
+      tune: !!$("#trtune").checked,
+      promote: !!stage,
+    };
+    if(stage) payload.target_stage = stage;
+
+    const needsKey = await authRequired();
+    const proceed = await confirmAction({
+      title: "Start training run",
+      body: payload.promote
+        ? `Train on ${payload.dataset_version || "the latest dataset"} and, if the approval gate passes and it beats the incumbent, promote to ${stage}.`
+        : `Train on ${payload.dataset_version || "the latest dataset"}. The model will not be registered.`,
+      confirm: "Start training", needsKey,
+    });
+    if(!proceed) return;
+    if(needsKey && !proceed.key){ toast("An API key is required to start training.", "bad"); return; }
+
+    start.disabled = true; start.textContent = "Starting...";
+    try {
+      const res = await api.post("/api/v1/training/runs", payload, proceed.key);
+      api.bust();
+      toast("Training started.", "ok");
+      $("#trresult").innerHTML = `<div class="note"><b>Run ${esc(res.run_id)} accepted.</b>
+        Polling for progress.</div>`;
+      pollRun(res.run_id);
+    } catch(e){
+      const msg = (e.status === 401 || e.status === 403)
+        ? "Rejected: the API key was missing or not accepted." : e.message;
+      $("#trresult").innerHTML = `<div class="note" style="border-color:var(--bad);
+        background:var(--bad-bg)"><b>Could not start.</b><br>${esc(msg)}</div>`;
+      toast(msg, "bad");
+    } finally {
+      start.disabled = false; start.textContent = "Start training";
+    }
+  };
+
+  document.querySelectorAll('[data-act="tr-detail"]').forEach(b => b.onclick = async () => {
+    const target = $("#trdetail");
+    target.innerHTML = card("Run detail", skeleton(4), { flush:true });
+    try {
+      const run = await api.get(`/api/v1/training/runs/${encodeURIComponent(b.dataset.id)}`, 0);
+      target.innerHTML = renderRunDetail(run);
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("Run detail", errorState(e.message, location.hash));
+    }
+  });
+
+  /* ---- AutoML wizard --------------------------------------------------- */
+  const amProfile = $("#amprofile");
+  if(amProfile) amProfile.onclick = async () => {
+    const version = $("#amds").value;
+    AUTOML.version = version;
+    AUTOML.target = null; AUTOML.selection = [];
+    amProfile.disabled = true; amProfile.textContent = "Profiling...";
+    $("#amwizard").innerHTML = card("Profiling dataset", skeleton(5), { flush:true });
+    try {
+      const d = await api.get(`/api/v1/automl/profile/${encodeURIComponent(version)}`, 0);
+      $("#amwizard").innerHTML = renderWizard(d);
+      wireWizard();
+    } catch(e){
+      $("#amwizard").innerHTML = card("Profiling failed", errorState(e.message, location.hash));
+    } finally {
+      amProfile.disabled = false; amProfile.textContent = "Profile dataset";
+    }
+  };
+
+  document.querySelectorAll('[data-act="am-detail"]').forEach(b => b.onclick = async () => {
+    const target = $("#amdetail");
+    target.innerHTML = card("AutoML run", skeleton(5), { flush:true });
+    try {
+      const run = await api.get(`/api/v1/automl/runs/${encodeURIComponent(b.dataset.id)}`, 0);
+      target.innerHTML = renderAutoMLRun(run);
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("AutoML run", errorState(e.message, location.hash));
+    }
+  });
+
+  wireWizard();
+
+  const rb = document.querySelector('[data-act="rollback"]');
+  if(rb) rb.onclick = () => runAction({
+    title:"Roll back deployment",
+    body:"This restores the previous model version as the serving version. It changes what production traffic is scored by.",
+    confirm:"Roll back", danger:true, needsKey:true,
+    path:"/api/v1/deployments/rollback", payload:{ reason:"manual rollback from console" },
+    success:"Rollback requested." });
+
+  document.querySelectorAll('[data-act="promote"]').forEach(b => b.onclick = () => runAction({
+    title:`Promote v${b.dataset.ver} to Production`,
+    body:"The registry stage machine and the approval gate still apply — this request can be rejected by the backend.",
+    confirm:"Promote", needsKey:true,
+    path:`/api/v1/models/${encodeURIComponent(b.dataset.model)}/versions/${encodeURIComponent(b.dataset.ver)}/stage`,
+    payload:{ stage:"Production" }, success:"Stage transition requested." }));
+
+  document.querySelectorAll('[data-act="ack"]').forEach(b => b.onclick = () => runAction({
+    title:"Acknowledge alert",
+    body:"Marks this alert as acknowledged. It stays in the history.",
+    confirm:"Acknowledge", needsKey:true,
+    path:`/api/v1/alerts/${encodeURIComponent(b.dataset.id)}/acknowledge`,
+    success:"Alert acknowledged." }));
+}
+
+/* ------------------------------------------------------------- header --- */
+
+/* Re-profiling on a target change is what makes the problem type honest: a
+   different column can mean a different problem, and showing the old answer
+   next to the new target would be worse than showing nothing. */
+function stampRefresh(){
+  const el = $("#lastrefresh");
+  if(el) el.textContent = "Updated " + new Date().toLocaleTimeString([], {hour12:false});
+}
+
+async function header(){
+  try {
+    const d = await api.get("/api/v1/dashboard", 20000);
+    const svc = d.service || {}, sys = d.system || {};
+    $("#envbadge").innerHTML = badge(String(svc.environment||"unknown").toUpperCase(), "info");
+    const ok = sys.latency_slo_met !== false && sys.error_slo_met !== false;
+    $("#healthbadge").innerHTML = badge(ok ? "Healthy" : "Degraded", ok ? "ok" : "warn", true);
+  } catch(e){
+    $("#envbadge").innerHTML = "";
+    $("#healthbadge").innerHTML = badge("API unreachable","bad",true);
+  }
+}
+
+/* --------------------------------------------------------------- boot --- */
+(function boot(){
+  const saved = localStorage.getItem("fmops-theme");   // a UI preference, not data
+  if(saved) document.documentElement.setAttribute("data-theme", saved);
+  $("#theme").onclick = () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    const next = cur === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("fmops-theme", next); } catch(e){ /* private mode */ }
+  };
+  $("#refresh").onclick = () => { api.bust(); render(); header(); toast("Reloaded."); };
+  $("#burger").onclick = () => $("#side").classList.toggle("open");
+  $("#nav").addEventListener("click", e => {
+    if(e.target.closest(".navlink")) $("#side").classList.remove("open"); });
+  window.addEventListener("hashchange", render);
+  if(!location.hash) location.hash = "#/overview";
+  render(); header(); renderSideFoot();
+  setInterval(header, 30000);
+})();

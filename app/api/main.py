@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -296,6 +297,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(automl.router)
     app.include_router(training.router)
     app.include_router(llm.router)
+
+    # The console is a handful of static assets rather than one giant inlined
+    # file. Mounted read-only from inside the image; the auth middleware
+    # already treats /static as public, and nothing here is generated per
+    # request, so this adds no work to any API path.
+    from fastapi.staticfiles import StaticFiles
+
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    else:  # pragma: no cover - only when the image is built wrong
+        logger.error("api.static_missing", extra={"path": str(static_dir)})
 
     from app.api.routes import dashboard
 

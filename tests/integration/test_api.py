@@ -7,6 +7,8 @@ monitoring and deployment endpoints have something genuine to work with.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 pytestmark = [pytest.mark.integration]
@@ -477,6 +479,24 @@ def test_dashboard_data_has_every_section(api_client):
     }
 
 
+def _console_source(api_client) -> str:
+    """The console as the browser actually receives it.
+
+    The page is a shell plus static modules, so asserting against /dashboard
+    alone would only see the shell. This follows the same assets the browser
+    loads, which is what the assertions below are really about.
+    """
+    page = api_client.get("/dashboard")
+    assert page.status_code == 200
+    sources = [page.text]
+    for path in re.findall(r'src="(/static/js/[^"]+)"', page.text):
+        asset = api_client.get(path)
+        assert asset.status_code == 200, f"console references {path} but it is not served"
+        sources.append(asset.text)
+    assert len(sources) > 1, "the console shell should load its script modules"
+    return "\n".join(sources)
+
+
 def test_dashboard_console_has_every_navigation_section(api_client):
     """The console must expose every area of the platform, not just a subset.
 
@@ -485,21 +505,21 @@ def test_dashboard_console_has_every_navigation_section(api_client):
     gets added and never surfaced, which is how a console quietly stops
     representing the system it is meant to operate.
     """
-    body = api_client.get("/dashboard").text
+    body = _console_source(api_client)
     for page_id, label in (
-        ("overview", "Overview"),
+        ("overview", "Command Center"),
         ("datasets", "Datasets"),
         ("automl", "AutoML"),
         ("training", "Training"),
         ("evaluation", "Evaluation"),
-        ("models", "Models"),
+        ("models", "Model Registry"),
         ("experiments", "Experiments"),
         ("deployments", "Deployments"),
         ("monitoring", "Monitoring"),
-        ("drift", "Drift"),
+        ("drift", "Drift Detection"),
         ("retraining", "Retraining"),
         ("champion", "Champion / Challenger"),
-        ("audit", "Audit Logs"),
+        ("audit", "Audit Log"),
         ("llm-overview", "Overview"),
         ("llm-prompts", "Prompts"),
         ("llm-evals", "Evaluations"),
@@ -515,16 +535,18 @@ def test_dashboard_console_has_every_navigation_section(api_client):
 def test_dashboard_console_states_its_limitations(api_client):
     """The console must not quietly drop the honesty the platform claims.
 
-    A UI is exactly where an unmeasurable number gets invented, so the two
-    claims that matter most are asserted here: that concept drift is not
-    derived from unlabelled data, and that the mock provider is not a language
-    model.
+    A UI is exactly where an unmeasurable number gets invented, so the claims
+    that matter most are asserted here: that concept drift is not derived from
+    unlabelled data, that the mock provider is not a language model, that the
+    safety screen is heuristic, that costs are estimates, and that AutoML fits
+    binary classification only.
     """
-    body = api_client.get("/dashboard").text
+    body = _console_source(api_client)
     assert "not a language model" in body
     assert "P(y|x)" in body
     assert "not a content-safety classifier" in body
     assert "estimates" in body
+    assert "binary classification only" in body
 
 
 def test_dashboard_console_ships_no_external_resources(api_client):
@@ -534,7 +556,7 @@ def test_dashboard_console_ships_no_external_resources(api_client):
     the console fail open into a blank page in exactly the environment it is
     meant to run in.
     """
-    body = api_client.get("/dashboard").text
+    body = _console_source(api_client)
     for marker in ("https://", "http://", "//cdn", "integrity="):
         assert marker not in body, f"console references an external resource: {marker}"
 
