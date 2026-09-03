@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.errors import error_body, register_exception_handlers
 from app.api.routes import (
+    datasets,
     deployments,
     experiments,
     health,
@@ -26,6 +27,7 @@ from app.api.routes import (
     monitoring,
     predictions,
     retraining,
+    training,
 )
 from app.api.security import AuthMiddlewareState
 from app.core.config import Settings, get_settings
@@ -80,6 +82,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     get_database()  # create/migrate the schema before serving
+
+    # Background training tasks do not survive a restart. Any run still
+    # marked in flight belongs to a process that is gone, so retire it rather
+    # than showing progress that nothing is making.
+    from app.training.jobs import get_training_run_store
+
+    get_training_run_store().reconcile_orphans()
+
     _restore_serving_state(settings)
     _warm_models(settings)
 
@@ -277,6 +287,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(deployments.router)
     app.include_router(experiments.router)
     app.include_router(retraining.router)
+    app.include_router(datasets.router)
+    app.include_router(training.router)
     app.include_router(llm.router)
 
     from app.api.routes import dashboard

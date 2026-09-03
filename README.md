@@ -61,7 +61,7 @@ extra steps.
 | **Retraining** | drift/performance/volume/schedule triggers with cooldown, automatic compare-and-decide |
 | **LLMOps** | 5 provider adapters behind one interface, versioned prompts, tracing, evaluation with A/B, heuristic safety screen, token and cost accounting with budgets |
 | **Infrastructure** | Terraform (S3, ECR, IAM, CloudWatch, SNS, SageMaker), 3 Docker images, Compose stack, 3 GitHub Actions workflows |
-| **Tests** | 223 tests: unit, API integration, and end-to-end lifecycle |
+| **Tests** | 239 tests: unit, API integration, and end-to-end lifecycle |
 
 ---
 
@@ -207,7 +207,8 @@ fmops aws status
 README documents. It is the fastest way to see what the platform is doing.
 
 ```
-Overview            serving model, deployment, drift, retraining, open alerts
+Overview            lifecycle status, serving model, deployment, drift, alerts
+DATA & TRAINING     Datasets · Training · Evaluation
 MODEL LIFECYCLE     Models · Experiments · Deployments
 OBSERVABILITY       Monitoring · Drift · Retraining
 MODEL GOVERNANCE    Champion / Challenger · Audit Logs
@@ -215,7 +216,15 @@ LLMOPS              Overview · Prompts · Evaluations · Tokens & Cost · Safet
 SYSTEM              System Health · API Docs
 ```
 
-Fifteen pages, all reading the live API. Notable ones:
+Eighteen pages, all reading the live API. Notable ones:
+
+- **Datasets** uploads a CSV, registers it as a content-addressed version and
+  runs the platform's validation engine over it -- the same engine the training
+  pipeline gates on. A failing report names the expectation, column, observed
+  and expected value.
+- **Training** starts a real run against a chosen dataset and algorithm, then
+  polls it to completion and shows the approval-gate decision, including the
+  champion/challenger comparison that produced it.
 
 - **Champion / Challenger** shows the head-to-head that decides a promotion, and
   states the verdict in the gate's own terms: a candidate is rejected when its
@@ -254,6 +263,11 @@ POST /api/v1/predict/batch
 POST /api/v1/feedback                   ground truth (unlocks live metrics)
 GET  /api/v1/model                      what is serving right now
 GET  /api/v1/models/{name}/versions
+POST /api/v1/datasets/upload            CSV in the body -> versioned + validated
+GET  /api/v1/datasets/{v}/validation    the real validation engine
+GET  /api/v1/datasets/{v}/preview       bounded sample + column profile
+POST /api/v1/training/runs              202 + run id; poll for the outcome
+GET  /api/v1/training/runs/{run_id}
 POST /api/v1/models/{name}/versions/{v}/stage
 POST /api/v1/models/{name}/versions/{v}/evaluate-gate
 GET  /api/v1/deployments/current
@@ -345,7 +359,7 @@ make coverage
 | Suite | Count | Covers |
 |---|---|---|
 | `tests/unit` | 164 | validation, drift statistics, approval, stage machine, deployment strategies, rollback, preprocessing, evaluation, registry, LLM providers/prompts/cost/safety/scorers |
-| `tests/integration` | 42 | the real FastAPI app against a real database: prediction, batch, feedback, registry, deployment, monitoring, LLMOps, dashboard |
+| `tests/integration` | 58 | the real FastAPI app against a real database: prediction, batch, feedback, registry, deployment, monitoring, LLMOps, dashboard |
 | `tests/pipeline` | 17 | valid and invalid datasets, drift → trigger → retrain, **worse-model rejection**, better-model promotion, rollback, shadow |
 
 The negative tests carry the most weight: an invalid dataset must produce no
@@ -402,6 +416,8 @@ Details and cost warnings: [`terraform/README.md`](terraform/README.md).
 |---|---|
 | [`architecture.md`](docs/architecture.md) | design principles, interfaces, request path, failure handling |
 | [`mlops.md`](docs/mlops.md) | training, versioning, registry, gates, retraining |
+| [`datasets.md`](docs/datasets.md) | upload, content-addressed versions, validation, preview |
+| [`training.md`](docs/training.md) | starting runs from the API, statuses, execution model |
 | [`llmops.md`](docs/llmops.md) | prompts, providers, evaluation, **safety limitations**, cost |
 | [`monitoring.md`](docs/monitoring.md) | metrics, the drift taxonomy, statistics, SLOs |
 | [`deployment.md`](docs/deployment.md) | local, Docker, AWS, production checklist, security posture |

@@ -256,6 +256,27 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         created_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS training_runs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        dataset_version TEXT,
+        algorithm TEXT,
+        tune INTEGER NOT NULL DEFAULT 0,
+        promote INTEGER NOT NULL DEFAULT 0,
+        target_stage TEXT,
+        model_name TEXT,
+        model_version INTEGER,
+        exit_code INTEGER,
+        error TEXT,
+        report TEXT NOT NULL DEFAULT '{}',
+        requested_by TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
     # ---------------- indexes --------------------------------------------- #
     "CREATE INDEX IF NOT EXISTS ix_inference_created ON inference_log (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_inference_request ON inference_log (request_id)",
@@ -268,6 +289,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_llm_traces_created ON llm_traces (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_llm_traces_model ON llm_traces (model, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_audit_created ON audit_log (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_training_runs_created ON training_runs (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_deploy_endpoint ON deployments (endpoint_name, updated_at)",
 )
 

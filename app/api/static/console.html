@@ -346,6 +346,20 @@ function toast(msg, kind){
 /* Write endpoints require an API key. The key is asked for per action, held
    in a local variable for the duration of that one request, and never
    written to localStorage, sessionStorage, a cookie or the URL. */
+let AUTH_REQUIRED = null;   // null = not yet known
+async function authRequired(){
+  if(AUTH_REQUIRED !== null) return AUTH_REQUIRED;
+  try {
+    const cfg = await api.get("/api/v1/config", 60000);
+    AUTH_REQUIRED = ((cfg.security || {}).auth_backend || "none") !== "none";
+  } catch(e){
+    // If the backend cannot be asked, ask for a key rather than send a write
+    // that is about to be rejected.
+    AUTH_REQUIRED = true;
+  }
+  return AUTH_REQUIRED;
+}
+
 function confirmAction(opts){
   return new Promise(resolve => {
     const m = document.createElement("div");
@@ -371,6 +385,7 @@ function confirmAction(opts){
   });
 }
 async function runAction(opts){
+  if(opts.needsKey) opts = { ...opts, needsKey: await authRequired() };
   const c = await confirmAction(opts);
   if(!c) return;
   if(opts.needsKey && !c.key){ toast("An API key is required for this action.", "bad"); return; }
@@ -394,10 +409,15 @@ PAGES.overview = {
   title: "Overview",
   intro: "Live state of the platform: the serving model, its deployment, drift, and system health. Every figure is read from the FMOps API.",
   async render(){
-    const d = await api.get("/api/v1/dashboard", 5000);
+    const extra = await loadAll({ dash:"/api/v1/dashboard", ds:"/api/v1/datasets",
+      runs:"/api/v1/training/runs?limit=1" }, 5000);
+    if(!extra.dash.ok) return errorState(extra.dash.error, "#/overview");
+    const d = extra.dash.data;
     const m = d.model || {}, dep = d.deployment || {}, dr = d.drift || {},
           sys = d.system || {}, rt = d.retraining || {}, al = d.alerts || {}, svc = d.service || {};
     const met = m.metrics || {};
+    const datasets = extra.ds.ok ? (extra.ds.data.versions || []) : null;
+    const runCount = extra.runs.ok ? extra.runs.data.count : null;
 
     const driftBadge = dr.available
       ? (dr.drift_detected ? badge("Detected","bad",true) : badge("Stable","ok",true))
@@ -405,10 +425,36 @@ PAGES.overview = {
     const health = (sys.latency_slo_met && sys.error_slo_met) ? badge("Within SLO","ok",true)
       : badge("SLO breach","bad",true);
 
-    const kpis = `<div class="grid g6" style="margin-bottom:14px">
-      ${kpi("Registered models", int(m.total_versions), m.model_name ? esc(m.model_name) : "")}
+    const lifecycle = card("Lifecycle", `<div class="flow">${[
+        ["Dataset", datasets === null ? null : datasets.length > 0, "#/datasets"],
+        ["Validation", datasets === null ? null : datasets.length > 0, "#/datasets"],
+        ["Training", runCount === null ? null : runCount > 0, "#/training"],
+        ["Evaluation", m.available && Object.keys(met).length > 0, "#/evaluation"],
+        ["Registry", !!m.available, "#/models"],
+        ["Approval", !!m.current_stage, "#/champion"],
+        ["Deployment", (dep.health === "healthy") || !!dep.state, "#/deployments"],
+        ["Monitoring", !!sys.available, "#/monitoring"],
+        ["Drift", dr.available ? !dr.drift_detected : null, "#/drift"],
+        ["Retraining", rt.available ? !rt.would_trigger : null, "#/retraining"],
+      ].map(([label, ok, href], i, arr) => {
+        const cls = ok === null ? "" : (ok ? "done" : "on");
+        const mark = ok === null ? "" : (ok ? " &#10003;" : " &#9888;");
+        return `<a class="step ${cls}" href="${href}" style="text-decoration:none">${label}${mark}</a>` +
+          (i < arr.length - 1 ? '<span class="arw">&rarr;</span>' : "");
+      }).join("")}</div>
+      <p class="dim" style="margin:12px 0 0;font-size:11.5px">A tick means the stage has produced
+        real state in this deployment. A warning marks a stage asking for attention &mdash; drift
+        detected, or a retraining trigger that would fire. Click a stage to open it.</p>`);
+
+    const kpis = `<div class="grid g4" style="margin-bottom:14px">
+      ${kpi("Dataset versions", datasets === null ? NA : int(datasets.length),
+            datasets && datasets.length ? `latest ${esc(datasets[datasets.length-1].version)}` : "")}
+      ${kpi("Training runs", runCount === null ? NA : int(runCount), "started from the API")}
+      ${kpi("Registered versions", int(m.total_versions), m.model_name ? esc(m.model_name) : "")}
       ${kpi("Serving version", m.available ? `v${esc(m.current_version)}` : NA,
             m.current_stage ? badge(m.current_stage, "info") : "")}
+    </div>
+    <div class="grid g4" style="margin-bottom:14px">
       ${kpi("Deployment", dep.strategy ? esc(dep.strategy) : (dep.provider ? esc(dep.provider) : NA),
             dep.health ? badge(dep.health, dep.health === "healthy" ? "ok" : "bad", true) : "")}
       ${kpi("Predictions logged", int(sys.requests), "since process start")}
@@ -477,7 +523,7 @@ PAGES.overview = {
       { label:"Raised", render:a => `${when(a.created_at)} <span class="dim">${ago(a.created_at)}</span>` },
     ], alerts, { empty:"No open alerts." }), { flush:true, right:`<a class="btn" href="#/monitoring">Monitoring</a>` });
 
-    return kpis
+    return lifecycle + kpis
       + `<div class="grid g2">${modelCard}${deployCard}</div>`
       + `<div class="grid g2">${driftCard}${rtCard}</div>`
       + alertCard
@@ -499,6 +545,291 @@ function driftRow(label, value, ref, bad, isCount){
     <span>${esc(label)}</span><span style="display:flex;gap:8px;align-items:center">${v}
     ${bad ? badge("above threshold","bad") : badge("normal","ok")}</span></div>`;
 }
+
+/* ---- Datasets ---------------------------------------------------------- */
+PAGES.datasets = {
+  title: "Datasets",
+  intro: "Registered dataset versions. Versions are content-addressed: uploading identical bytes returns the existing version rather than creating a duplicate.",
+  async render(){
+    const r = await loadAll({ list:"/api/v1/datasets" }, 6000);
+    const uploader = card("Upload a dataset", `
+      <p class="dim" style="margin:0 0 12px">CSV only, up to 25 MB. The file is parsed with pandas,
+        registered as a new version, and validated by the platform's own engine. It is never
+        executed, and the filename never chooses a path.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="file" id="dsfile" accept=".csv,text/csv" style="max-width:280px">
+        <input type="text" id="dsdesc" placeholder="Description (optional)" style="max-width:250px">
+        <button class="btn pri" id="dsupload">Upload and validate</button>
+      </div>
+      <div id="dsresult" style="margin-top:12px"></div>`);
+
+    const tbl = sect(r.list, d => {
+      const versions = d.versions || [];
+      return card("Registered versions", table([
+        { label:"Version", render:v => `<b class="mono">${esc(v.version)}</b>` },
+        { label:"Dataset", render:v => `<span class="mono">${esc(v.dataset_name||"-")}</span>` },
+        { label:"Rows", num:true, render:v => int(v.n_rows) },
+        { label:"Columns", num:true, render:v => int(v.n_columns) },
+        { label:"Hash", render:v => v.content_hash ?
+            `<span class="mono dim">${esc(String(v.content_hash).slice(0,12))}</span>` : NA },
+        { label:"DVC", render:v => has(v.dvc_tracked) ?
+            (v.dvc_tracked ? badge("tracked","ok") : badge("not tracked","mute")) : NA },
+        { label:"Created", render:v => when(v.created_at) },
+        { label:"Actions", render:v =>
+            `<button class="btn" data-act="ds-validate" data-v="${esc(v.version)}">Validate</button>
+             <button class="btn" data-act="ds-preview" data-v="${esc(v.version)}">Preview</button>` },
+      ], versions, { empty:"No datasets registered. Upload a CSV above to create the first version." }),
+      { flush:true, sub:`${versions.length} version(s)` });
+    }, "datasets");
+
+    return uploader + tbl + `<div id="dsdetail"></div>`;
+  }
+};
+
+function renderValidation(v){
+  if(!v) return "";
+  const head = `<div class="grid g4" style="margin-bottom:12px">
+    ${kpi("Status", v.passed ? badge("PASSED","ok",true) : badge("FAILED","bad",true),
+          `engine: ${esc(v.engine||"-")}`)}
+    ${kpi("Expectations", int(v.expectations))}
+    ${kpi("Passed", int(v.succeeded))}
+    ${kpi("Failed", int(v.failed), has(v.warnings) ? `${v.warnings} warning(s)` : "")}
+  </div>`;
+  const fails = v.failures || [];
+  const body = fails.length ? table([
+    { label:"Expectation", render:f => `<span class="mono">${esc(f.expectation)}</span>` },
+    { label:"Column", render:f => f.column ? `<span class="mono">${esc(f.column)}</span>` : NA },
+    { label:"Severity", render:f => badge(f.severity, f.severity==="warning"?"warn":"bad") },
+    { label:"Observed", render:f => f.observed ? `<span class="mono dim">${esc(f.observed)}</span>` : NA },
+    { label:"Expected", render:f => f.expected ? `<span class="mono dim">${esc(f.expected)}</span>` : NA },
+    { label:"Message", render:f => esc(f.message) },
+  ], fails, { empty:"" }) : `<div class="state"><div class="big">All expectations passed</div>
+      ${v.expectations} checks, no failures.</div>`;
+  return head + body + (v.truncated ? `<p class="dim" style="margin:10px 0 0">
+    Only the first 50 failures are listed.</p>` : "");
+}
+
+function renderPreview(p){
+  const cols = p.column_profile || [];
+  const sample = p.sample || [];
+  const names = cols.map(c => c.name);
+  const rows = sample.length ? `<div class="scroll"><table><thead><tr>${
+    names.map(n => `<th>${esc(n)}</th>`).join("")}</tr></thead><tbody>${
+    sample.map(row => `<tr>${names.map(n =>
+      `<td class="mono" style="font-size:11.5px">${row[n] === null || row[n] === undefined
+        ? `<span class="dim">null</span>` : esc(String(row[n]).slice(0,40))}</td>`).join("")}</tr>`).join("")
+  }</tbody></table></div>` : emptyState("No sample rows.");
+
+  return card(`Preview - ${esc(p.version)}`, `
+    <div class="grid g3" style="margin-bottom:12px">
+      ${kpi("Rows", int(p.rows))}${kpi("Columns", int(p.columns))}
+      ${kpi("Showing", int(p.preview_rows), "sample capped server-side")}
+    </div>
+    <div class="dim" style="font-size:10.5px;font-weight:700;letter-spacing:.06em;
+      text-transform:uppercase;margin:14px 0 7px">Column profile</div>` +
+    table([
+      { label:"Column", render:c => `<span class="mono">${esc(c.name)}</span>` },
+      { label:"Type", render:c => `<span class="mono dim">${esc(c.dtype)}</span>` },
+      { label:"Missing", num:true, render:c => `${int(c.missing)} <span class="dim">(${c.missing_pct}%)</span>` },
+      { label:"Unique", num:true, render:c => int(c.unique) },
+      { label:"Example", render:c => c.example ? `<span class="mono dim">${esc(c.example)}</span>` : NA },
+    ], cols, { empty:"No columns." }) +
+    `<div class="dim" style="font-size:10.5px;font-weight:700;letter-spacing:.06em;
+      text-transform:uppercase;margin:14px 0 7px">Sample rows</div>` + rows);
+}
+
+/* ---- Training ---------------------------------------------------------- */
+PAGES.training = {
+  title: "Training",
+  intro: "Start a training run and follow it. A run executes the platform's existing pipeline: validation, feature engineering, training, optional tuning, evaluation, and the approval gate.",
+  async render(){
+    const r = await loadAll({ algos:"/api/v1/models/algorithms", ds:"/api/v1/datasets",
+      runs:"/api/v1/training/runs?limit=25" }, 4000);
+
+    const algos = r.algos.ok ? (r.algos.data.algorithms || {}) : {};
+    const available = Object.entries(algos).filter(([, ok]) => ok).map(([k]) => k);
+    const unavailable = Object.entries(algos).filter(([, ok]) => !ok).map(([k]) => k);
+    const versions = r.ds.ok ? (r.ds.data.versions || []) : [];
+
+    const form = card("Start a training run", `
+      <div class="grid g3" style="gap:12px">
+        <div><label class="dim" style="font-size:11.5px">Dataset version</label>
+          <select id="trds">${versions.length
+            ? `<option value="">Latest registered</option>` + versions.map(v =>
+                `<option value="${esc(v.version)}">${esc(v.version)} (${v.n_rows} rows)</option>`).join("")
+            : `<option value="">No datasets registered</option>`}</select></div>
+        <div><label class="dim" style="font-size:11.5px">Algorithm</label>
+          <select id="tralgo">${available.map(a =>
+            `<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select></div>
+        <div><label class="dim" style="font-size:11.5px">After evaluation</label>
+          <select id="trstage">
+            <option value="">Train only - do not register</option>
+            <option value="Staging">Register and attempt Staging</option>
+            <option value="Production">Register and attempt Production</option>
+          </select></div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;margin-top:12px;flex-wrap:wrap">
+        <label style="display:flex;gap:7px;align-items:center;cursor:pointer">
+          <input type="checkbox" id="trtune"> Run hyperparameter search</label>
+        <span class="spacer"></span>
+        <button class="btn pri" id="trstart" ${versions.length?"":"disabled"}>Start training</button>
+      </div>
+      ${unavailable.length ? `<p class="dim" style="margin:12px 0 0">Not installed in this
+        environment: ${unavailable.map(a=>`<span class="mono">${esc(a)}</span>`).join(", ")}</p>`:""}
+      <div class="note" style="margin-top:12px">Promotion is never automatic. The approval gate still
+        has to pass <b>and</b> the candidate has to beat the incumbent by the configured margin -
+        this only asks for the attempt.</div>
+      <div id="trresult" style="margin-top:12px"></div>`);
+
+    const runs = sect(r.runs, d => card("Training runs", table([
+      { label:"Run", render:x => `<span class="mono">${esc(String(x.run_id).replace("train-","").slice(0,12))}</span>` },
+      { label:"Status", render:x => runStatusBadge(x.status) },
+      { label:"Dataset", render:x => x.dataset_version ?
+          `<span class="mono">${esc(x.dataset_version)}</span>` : `<span class="dim">latest</span>` },
+      { label:"Algorithm", render:x => `<span class="mono">${esc(x.algorithm||"-")}</span>` },
+      { label:"Tuned", render:x => x.tune ? badge("yes","info") : `<span class="dim">no</span>` },
+      { label:"ROC-AUC", num:true, render:x => num((x.metrics||{}).roc_auc) },
+      { label:"F1", num:true, render:x => num((x.metrics||{}).f1) },
+      { label:"Model", render:x => has(x.model_version) ? `<b class="mono">v${esc(x.model_version)}</b>` : NA },
+      { label:"Duration", num:true, render:x => has(x.duration_seconds) ?
+          `<span class="mono">${x.duration_seconds.toFixed(1)}s</span>` : NA },
+      { label:"Started", render:x => when(x.created_at) },
+      { label:"", render:x => `<button class="btn" data-act="tr-detail" data-id="${esc(x.run_id)}">Detail</button>` },
+    ], d.runs || [], { empty:"No training runs yet. Start one above." }),
+    { flush:true, sub:`${d.count || 0} run(s)`,
+      right:`<button class="btn" data-retry="${esc(location.hash)}">Refresh</button>` }), "training runs");
+
+    return form + runs + `<div id="trdetail"></div>`;
+  }
+};
+
+function runStatusBadge(s){
+  const map = { completed:"ok", rejected:"warn", failed:"bad", running:"info", queued:"mute" };
+  return badge(s || "unknown", map[s] || "mute", s === "running" || s === "queued");
+}
+
+function renderRunDetail(run){
+  const rep = run.report || {}, m = run.metrics || {};
+  const stages = ["Dataset","Validation","Features","Training"];
+  if(run.tune) stages.push("Tuning");
+  stages.push("Evaluation");
+  if(run.promote) stages.push("Approval gate");
+  if(rep.promoted) stages.push("Promoted");
+  const done = run.status === "completed";
+  const pipeline = `<div class="flow">${stages.map((s,i,a) =>
+    `<span class="step ${done?"done":""}">${esc(s)}</span>` +
+    (i<a.length-1?'<span class="arw">-&gt;</span>':"")).join("")}</div>`;
+
+  const metrics = Object.keys(m).length ? `<div class="grid g4" style="margin-top:14px">
+      ${kpi("Accuracy", num(m.accuracy))}${kpi("Precision", num(m.precision))}
+      ${kpi("Recall", num(m.recall))}${kpi("F1", num(m.f1))}</div>
+    <div class="grid g4" style="margin-top:12px">
+      ${kpi("ROC-AUC", num(m.roc_auc))}${kpi("PR-AUC", num(m.pr_auc))}
+      ${kpi("Log loss", num(m.log_loss))}${kpi("Brier", num(m.brier_score))}</div>`
+    : `<div class="state" style="margin-top:12px">No metrics - the run did not reach evaluation.</div>`;
+
+  const tuning = rep.tuning ? card("Hyperparameter search", `<dl class="kv">
+      <dt>Backend</dt><dd class="mono">${esc(rep.tuning.backend)}</dd>
+      <dt>Trials</dt><dd class="mono">${esc(rep.tuning.trials)}</dd>
+      <dt>Best score</dt><dd>${num(rep.tuning.best_score)}</dd>
+      <dt>Best params</dt><dd class="mono" style="font-size:11px">${esc(JSON.stringify(rep.tuning.best_params||{}))}</dd>
+    </dl>`) : "";
+
+  const cmp = rep.comparison;
+  const approval = has(rep.approval_decision) ? card("Approval gate", `
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+        ${badge(rep.approval_decision, rep.approval_decision==="approved"?"ok":"bad", true)}
+        ${rep.promoted ? badge("promoted to " + (rep.final_stage||""),"ok")
+                       : badge("not promoted","mute")}</div>
+      <p style="margin:0;color:var(--ink-2)">${esc(rep.approval_reason||"")}</p>
+      ${(rep.failed_checks||[]).length ? `<p style="margin:10px 0 0">Failed checks:
+        ${(rep.failed_checks||[]).map(c=>badge(c,"bad")).join(" ")}</p>`:""}
+      ${cmp ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line-2)">
+        <div class="dim" style="font-size:10.5px;font-weight:700;letter-spacing:.06em;
+          text-transform:uppercase;margin-bottom:6px">Champion / challenger</div>
+        <span class="mono">${esc(cmp.metric||"")}</span>:
+        candidate ${num(cmp.candidate_value)} vs baseline ${num(cmp.baseline_value)}
+        &rarr; ${badge(cmp.decision||"-", cmp.decision==="promote"?"ok":"bad")}
+      </div>`:""}`) : "";
+
+  const error = run.error ? `<div class="note" style="border-color:var(--bad);
+    background:var(--bad-bg);margin-bottom:14px"><b>Run failed.</b><br>${esc(run.error)}</div>` : "";
+
+  return card("Run " + esc(String(run.run_id).replace("train-","")), `
+    ${error}
+    <dl class="kv">
+      <dt>Status</dt><dd>${runStatusBadge(run.status)}</dd>
+      <dt>Dataset</dt><dd class="mono">${esc(run.dataset_version || "latest registered")}</dd>
+      <dt>Algorithm</dt><dd class="mono">${esc(run.algorithm||"-")}</dd>
+      <dt>Tuning</dt><dd>${run.tune?badge("enabled","info"):`<span class="dim">disabled</span>`}</dd>
+      <dt>Model</dt><dd>${has(run.model_version)?`<b class="mono">v${esc(run.model_version)}</b>
+        <span class="dim">${esc(run.model_name||"")}</span>`:NA}</dd>
+      <dt>Duration</dt><dd>${has(run.duration_seconds)?`<span class="mono">${run.duration_seconds.toFixed(2)}s</span>`:NA}</dd>
+      <dt>Started</dt><dd>${when(run.started_at || run.created_at)}</dd>
+      <dt>Completed</dt><dd>${when(run.completed_at)}</dd>
+    </dl>
+    ${pipeline}
+    ${metrics}`) + tuning + approval;
+}
+
+/* ---- Evaluation -------------------------------------------------------- */
+PAGES.evaluation = {
+  title: "Evaluation",
+  intro: "Offline evaluation for every registered version, and the live quality of the serving model where ground-truth labels exist.",
+  async render(){
+    const r = await loadAll({ dash:"/api/v1/dashboard", runs:"/api/v1/training/runs?limit=50",
+      perf:"/api/v1/monitoring/performance" }, 6000);
+    const m = (r.dash.ok ? r.dash.data.model : {}) || {};
+    const met = m.metrics || {};
+    const versions = m.versions || [];
+
+    const serving = m.available ? card("Serving version - offline evaluation", `
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+        <b class="mono">${esc(m.model_name)}</b> v${esc(m.current_version)}
+        ${badge(m.current_stage,"info")}
+        <span class="dim mono">${esc(m.algorithm||"")}</span></div>
+      <div class="grid g4">
+        ${kpi("Accuracy", num(met.accuracy))}${kpi("Precision", num(met.precision))}
+        ${kpi("Recall", num(met.recall))}${kpi("F1", num(met.f1))}</div>
+      <div class="grid g4" style="margin-top:12px">
+        ${kpi("ROC-AUC", num(met.roc_auc))}${kpi("PR-AUC", num(met.pr_auc))}
+        ${kpi("Log loss", num(met.log_loss))}${kpi("Brier", num(met.brier_score))}</div>
+      <div class="note" style="margin-top:14px">These are <b>offline</b> metrics from the held-out
+        evaluation set, not production accuracy.</div>`)
+      : unavailable("No model registered.");
+
+    const live = sect(r.perf, p => card("Live quality (from labels)", p.available ? `
+        <div class="grid g4">
+          ${kpi("Accuracy", num(p.accuracy))}${kpi("Precision", num(p.precision))}
+          ${kpi("Recall", num(p.recall))}${kpi("ROC-AUC", num(p.roc_auc))}</div>
+        <p class="dim" style="margin:12px 0 0">From ${int(p.labelled_samples)} labelled production rows.</p>`
+      : `<div class="state"><div class="big">Ground-truth labels required</div>
+         ${esc(p.detail||"")}</div>`), "performance");
+
+    const byVersion = card("Registered versions", table([
+      { label:"Version", render:v => `<b class="mono">v${esc(v.version)}</b>` },
+      { label:"Stage", render:v => badge(v.stage||"None", v.stage==="Production"?"ok":v.stage==="Staging"?"info":"mute") },
+      { label:"Status", render:v => badge(v.status||"-","mute") },
+      { label:"ROC-AUC", num:true, render:v => num(v.roc_auc) },
+      { label:"F1", num:true, render:v => num(v.f1) },
+      { label:"Created", render:v => when(v.created_at) },
+    ], versions, { empty:"No registered versions." }), { flush:true });
+
+    const evalRuns = sect(r.runs, d => card("Evaluation from training runs", table([
+      { label:"Run", render:x => `<span class="mono">${esc(String(x.run_id).replace("train-","").slice(0,12))}</span>` },
+      { label:"Status", render:x => runStatusBadge(x.status) },
+      { label:"Dataset", render:x => `<span class="mono">${esc(x.dataset_version||"latest")}</span>` },
+      { label:"Algorithm", render:x => `<span class="mono">${esc(x.algorithm||"-")}</span>` },
+      { label:"Accuracy", num:true, render:x => num((x.metrics||{}).accuracy) },
+      { label:"F1", num:true, render:x => num((x.metrics||{}).f1) },
+      { label:"ROC-AUC", num:true, render:x => num((x.metrics||{}).roc_auc) },
+      { label:"Model", render:x => has(x.model_version)?`<span class="mono">v${esc(x.model_version)}</span>`:NA },
+    ], (d.runs||[]).filter(x => Object.keys(x.metrics||{}).length),
+       { empty:"No evaluated training runs yet." }), { flush:true }), "training runs");
+
+    return `<div class="grid g2">${serving}${live}</div>` + byVersion + evalRuns;
+  }
+};
 
 /* ---- Models ------------------------------------------------------------ */
 PAGES.models = {
@@ -1213,6 +1544,8 @@ PAGES.system = {
 /* ------------------------------------------------------------- routes --- */
 const NAV = [
   { group:null, items:[ ["overview","Overview","▤"] ] },
+  { group:"Data & training", items:[ ["datasets","Datasets","▦"], ["training","Training","⚙"],
+      ["evaluation","Evaluation","◎"] ] },
   { group:"Model lifecycle", items:[ ["models","Models","◫"], ["experiments","Experiments","⌗"],
       ["deployments","Deployments","⇪"] ] },
   { group:"Observability", items:[ ["monitoring","Monitoring","◴"], ["drift","Drift","∿"],
@@ -1270,6 +1603,33 @@ async function render(){
   wirePage();
 }
 
+
+/* A run in flight is the one thing worth following without a manual refresh.
+   Polls until the run reaches a terminal state, then stops -- there is nothing
+   further to learn, so continuing would be pure load. */
+async function pollRun(runId, attempt){
+  attempt = attempt || 0;
+  if(attempt > 200) return;
+  let run;
+  try { run = await api.get(`/api/v1/training/runs/${encodeURIComponent(runId)}`, 0); }
+  catch(e){ return; }
+
+  const box = $("#trresult");
+  if(box) box.innerHTML = `<div class="note"><b>Run ${esc(runId)}</b> &mdash;
+    ${runStatusBadge(run.status)}${run.duration_seconds != null
+      ? ` <span class="dim">${run.duration_seconds.toFixed(1)}s</span>` : ""}</div>`;
+
+  if(["completed","failed","rejected"].includes(run.status)){
+    api.bust();
+    toast(`Training ${run.status}.`, run.status === "completed" ? "ok" : "bad");
+    const detail = $("#trdetail");
+    if(detail) detail.innerHTML = renderRunDetail(run);
+    if(route() === "training") render();
+    return;
+  }
+  setTimeout(() => pollRun(runId, attempt + 1), 3000);
+}
+
 function wirePage(){
   document.querySelectorAll("[data-retry]").forEach(b =>
     b.onclick = () => { api.bust(); render(); });
@@ -1288,6 +1648,134 @@ function wirePage(){
     };
     q.oninput = apply; sel.onchange = apply;
   }
+
+  /* ---- Datasets: upload, validate, preview ----------------------------- */
+  const up = $("#dsupload");
+  if(up) up.onclick = async () => {
+    const input = $("#dsfile");
+    const file = input && input.files && input.files[0];
+    if(!file){ toast("Choose a CSV file first.", "bad"); return; }
+    if(!/\.csv$/i.test(file.name)){ toast("Only .csv files are accepted.", "bad"); return; }
+
+    const needsKey = await authRequired();
+    const proceed = await confirmAction({
+      title: "Upload dataset",
+      body: `Register ${file.name} (${(file.size/1024).toFixed(0)} KB) as a new dataset version and validate it.`,
+      confirm: "Upload", needsKey,
+    });
+    if(!proceed) return;
+    if(needsKey && !proceed.key){ toast("An API key is required to upload.", "bad"); return; }
+
+    up.disabled = true; up.textContent = "Uploading...";
+    const desc = ($("#dsdesc") && $("#dsdesc").value) || "";
+    const qs = `?filename=${encodeURIComponent(file.name)}&description=${encodeURIComponent(desc)}`;
+    try {
+      const res = await fetch("/api/v1/datasets/upload" + qs, {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "text/csv" },
+                               proceed.key ? { "X-API-Key": proceed.key } : {}),
+        body: file,
+      });
+      const body = await res.json();
+      if(!res.ok){
+        const msg = (body.error && body.error.message) || `HTTP ${res.status}`;
+        $("#dsresult").innerHTML = `<div class="note" style="border-color:var(--bad);
+          background:var(--bad-bg)"><b>Upload rejected.</b><br>${esc(msg)}</div>`;
+        toast("Upload rejected: " + msg, "bad");
+        return;
+      }
+      api.bust();
+      toast(`Registered ${body.version} (${body.rows} rows).`, "ok");
+      $("#dsresult").innerHTML =
+        `<div class="note"><b>Registered ${esc(body.version)}</b> &mdash; ${body.rows} rows,
+          ${body.columns} columns.</div>` +
+        (body.validation ? renderValidation(body.validation) : "");
+    } catch(e){
+      toast("Upload failed: " + e.message, "bad");
+    } finally {
+      up.disabled = false; up.textContent = "Upload and validate";
+    }
+  };
+
+  document.querySelectorAll('[data-act="ds-validate"]').forEach(b => b.onclick = async () => {
+    const target = $("#dsdetail");
+    b.disabled = true; b.textContent = "Validating...";
+    target.innerHTML = card("Validation", skeleton(4), { flush:true });
+    try {
+      const v = await api.get(`/api/v1/datasets/${encodeURIComponent(b.dataset.v)}/validation`, 0);
+      target.innerHTML = card(`Validation - ${esc(b.dataset.v)}`, renderValidation(v));
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("Validation", errorState(e.message, location.hash));
+    } finally { b.disabled = false; b.textContent = "Validate"; }
+  });
+
+  document.querySelectorAll('[data-act="ds-preview"]').forEach(b => b.onclick = async () => {
+    const target = $("#dsdetail");
+    b.disabled = true; b.textContent = "Loading...";
+    target.innerHTML = card("Preview", skeleton(4), { flush:true });
+    try {
+      const p = await api.get(`/api/v1/datasets/${encodeURIComponent(b.dataset.v)}/preview?rows=15`, 0);
+      target.innerHTML = renderPreview(p);
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("Preview", errorState(e.message, location.hash));
+    } finally { b.disabled = false; b.textContent = "Preview"; }
+  });
+
+  /* ---- Training: start a run, then poll it ----------------------------- */
+  const start = $("#trstart");
+  if(start) start.onclick = async () => {
+    const stage = $("#trstage").value;
+    const payload = {
+      dataset_version: $("#trds").value || null,
+      algorithm: $("#tralgo").value || null,
+      tune: !!$("#trtune").checked,
+      promote: !!stage,
+    };
+    if(stage) payload.target_stage = stage;
+
+    const needsKey = await authRequired();
+    const proceed = await confirmAction({
+      title: "Start training run",
+      body: payload.promote
+        ? `Train on ${payload.dataset_version || "the latest dataset"} and, if the approval gate passes and it beats the incumbent, promote to ${stage}.`
+        : `Train on ${payload.dataset_version || "the latest dataset"}. The model will not be registered.`,
+      confirm: "Start training", needsKey,
+    });
+    if(!proceed) return;
+    if(needsKey && !proceed.key){ toast("An API key is required to start training.", "bad"); return; }
+
+    start.disabled = true; start.textContent = "Starting...";
+    try {
+      const res = await api.post("/api/v1/training/runs", payload, proceed.key);
+      api.bust();
+      toast("Training started.", "ok");
+      $("#trresult").innerHTML = `<div class="note"><b>Run ${esc(res.run_id)} accepted.</b>
+        Polling for progress.</div>`;
+      pollRun(res.run_id);
+    } catch(e){
+      const msg = (e.status === 401 || e.status === 403)
+        ? "Rejected: the API key was missing or not accepted." : e.message;
+      $("#trresult").innerHTML = `<div class="note" style="border-color:var(--bad);
+        background:var(--bad-bg)"><b>Could not start.</b><br>${esc(msg)}</div>`;
+      toast(msg, "bad");
+    } finally {
+      start.disabled = false; start.textContent = "Start training";
+    }
+  };
+
+  document.querySelectorAll('[data-act="tr-detail"]').forEach(b => b.onclick = async () => {
+    const target = $("#trdetail");
+    target.innerHTML = card("Run detail", skeleton(4), { flush:true });
+    try {
+      const run = await api.get(`/api/v1/training/runs/${encodeURIComponent(b.dataset.id)}`, 0);
+      target.innerHTML = renderRunDetail(run);
+      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
+    } catch(e){
+      target.innerHTML = card("Run detail", errorState(e.message, location.hash));
+    }
+  });
 
   const rb = document.querySelector('[data-act="rollback"]');
   if(rb) rb.onclick = () => runAction({

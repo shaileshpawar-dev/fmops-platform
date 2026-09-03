@@ -488,6 +488,9 @@ def test_dashboard_console_has_every_navigation_section(api_client):
     body = api_client.get("/dashboard").text
     for page_id, label in (
         ("overview", "Overview"),
+        ("datasets", "Datasets"),
+        ("training", "Training"),
+        ("evaluation", "Evaluation"),
         ("models", "Models"),
         ("experiments", "Experiments"),
         ("deployments", "Deployments"),
