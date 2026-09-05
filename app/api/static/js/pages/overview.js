@@ -166,7 +166,7 @@ PAGES.overview = {
           ${kpi("Serving", dep.current_version != null
             ? `<span class="mono">v${int(dep.current_version)}</span>` : NA,
             dep.previous_version != null ? `previous v${dep.previous_version}` : "no previous")}
-          ${kpi("Strategy", esc(dep.strategy || "-"))}
+          ${kpi("Strategy", dep.strategy ? badge(dep.strategy, "mute") : NA)}
           ${kpi("Provider", esc(dep.provider || "-"),
             svc.aws_enabled ? "AWS integration on" : "in-process, not an AWS ML service")}
         </div>

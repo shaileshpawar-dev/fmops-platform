@@ -150,7 +150,10 @@ nav{padding:8px var(--s2) var(--s5);flex:1}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:12px 14px}
 .kpi .k{font:500 9.5px/1 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--ink-4)}
-.kpi .v{font:600 19px/1.15 var(--mono);margin-top:6px;letter-spacing:-.02em}
+/* Sized for a number. A longer identifier-like value wraps rather than being
+   silently clipped -- a truncated strategy name reads as a different word. */
+.kpi .v{font:600 19px/1.15 var(--mono);margin-top:6px;letter-spacing:-.02em;
+  overflow-wrap:anywhere}
 .kpi .m{font:400 10.5px/1.35 var(--mono);color:var(--ink-3);margin-top:3px}
 
 table{width:100%;border-collapse:collapse;font-size:12.5px}
@@ -568,7 +571,14 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px soli
   .hstrip .u{flex:1 1 50%;border-bottom:1px solid var(--line)}
   .traffic .lane{grid-template-columns:44px minmax(0,1fr) 46px;gap:8px}
   .mhead h1{font-size:17px}
+  /* The header row cannot hold seven items at phone width: it overflowed and
+     pushed Refresh and the theme toggle off-screen. The refresh stamp and the
+     environment badge are the two that are redundant here -- the environment
+     is already in the sidebar footer -- so they drop, and the page title
+     truncates to one line instead of wrapping to three inside a 54px bar. */
   .top{padding:0 var(--s3);gap:var(--s2)}
+  .headmeta,#envbadge{display:none}
+  .pagemeta h2{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14.5px}
 }
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
