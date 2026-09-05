@@ -804,13 +804,21 @@ async function stepApproval(){
     } catch(e){ /* recorded outcome simply unavailable */ }
   }
 
-  let gate = null, gateError = null, needsKey = false;
-  try {
-    gate = await api.post(
-      `/api/v1/models/${encodeURIComponent(PRJ.modelName)}/versions/${PRJ.modelVersion}/evaluate-gate`);
-  } catch(e){
-    if(e.status === 401 || e.status === 403) needsKey = true;
-    else gateError = e.message;
+  /* Ask whether a key is needed before sending a request that would need one.
+     The gate endpoint is a POST, so on a key-protected deployment an
+     unauthenticated probe is a guaranteed 401 -- handled, but it still logs a
+     console error on every visit to this step. Skip it and show the key panel
+     directly; the recorded outcome below does not need the call. */
+  let gate = null, gateError = null;
+  let needsKey = await authRequired();
+  if(!needsKey){
+    try {
+      gate = await api.post(`/api/v1/models/${encodeURIComponent(PRJ.modelName)}`
+        + `/versions/${PRJ.modelVersion}/evaluate-gate`);
+    } catch(e){
+      if(e.status === 401 || e.status === 403) needsKey = true;
+      else gateError = e.message;
+    }
   }
   if(gate && gate.approval && gate.approval.decision){
     PRJ.gateDecision = gate.approval.decision; prjSave();
