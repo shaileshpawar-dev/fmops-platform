@@ -291,9 +291,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(predictions.router)
     app.include_router(models.router)
     app.include_router(deployments.router)
+    # datasets before experiments: experiments owns GET /api/v1/datasets/{version},
+    # which is a single-segment catch-all under the same prefix and would
+    # otherwise swallow literal paths like /api/v1/datasets/limits. Nothing in
+    # experiments is shadowed in return -- datasets declares no catch-all.
+    app.include_router(datasets.router)
     app.include_router(experiments.router)
     app.include_router(retraining.router)
-    app.include_router(datasets.router)
     app.include_router(automl.router)
     app.include_router(training.router)
     app.include_router(llm.router)

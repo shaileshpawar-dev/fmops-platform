@@ -207,16 +207,21 @@ fmops aws status
 README documents. It is the fastest way to see what the platform is doing.
 
 ```
-Overview            lifecycle status, serving model, deployment, drift, alerts
-DATA & TRAINING     Datasets · AutoML · Training · Evaluation
-MODEL LIFECYCLE     Models · Experiments · Deployments
-OBSERVABILITY       Monitoring · Drift · Retraining
-MODEL GOVERNANCE    Champion / Challenger · Audit Logs
+OVERVIEW            Command Center · New ML Project
+MODEL LIFECYCLE     Datasets · AutoML · Training · Evaluation · Model Registry
+DEPLOYMENT          Deployments
+OBSERVABILITY       Monitoring · Drift Detection · Retraining · Experiments
+GOVERNANCE          Champion / Challenger · Audit Log
 LLMOPS              Overview · Prompts · Evaluations · Tokens & Cost · Safety
 SYSTEM              System Health · API Docs
 ```
 
-Nineteen pages, all reading the live API. Notable ones:
+Twenty pages, all reading the live API. Notable ones:
+
+- **New ML Project** is a ten-step guided path from a CSV to a deployed,
+  monitored model, for someone who does not yet know which page to start on.
+  It drives the same endpoints as the pages below and adds no backend of its
+  own; see [docs/workflow.md](docs/workflow.md) for what it can and cannot do.
 
 - **AutoML** profiles a dataset, recommends a target and a problem type with
   the evidence for each, proposes candidate models, trains them, and ranks

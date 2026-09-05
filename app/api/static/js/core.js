@@ -45,7 +45,7 @@ function table(cols, rows, opts){
   const o = opts || {};
   if(!rows || !rows.length) return emptyState(o.empty || "No records.");
   const head = cols.map(c => `<th${c.num?' class="num"':""}>${esc(c.label)}</th>`).join("");
-  const body = rows.map(r => "<tr>" + cols.map(c =>
+  const body = rows.map(r => `<tr class="${o.rowClass ? esc(o.rowClass(r)) : ""}">` + cols.map(c =>
     `<td${c.num?' class="num"':""}>${c.render(r)}</td>`).join("") + "</tr>").join("");
   return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`; }
 

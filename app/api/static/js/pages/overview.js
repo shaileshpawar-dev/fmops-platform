@@ -150,7 +150,20 @@ PAGES.overview = {
            <span class="sub">${sloOk ? "One or more sections did not report."
              : "An SLO is currently breached — see Monitoring."}</span></div>`;
 
-    return hero + banner + lifecycle + kpis
+    // Entry point for someone who has not built anything here yet. The
+    // Command Center answers "what is happening"; this answers "how do I
+    // start", which is a different question and deserves its own affordance.
+    const cta = `<div class="cta">
+      <div class="txt">
+        <b>Build and deploy a machine-learning model</b>
+        <span>Upload a dataset, train candidate models, compare them, and deploy one that
+          clears the approval gate — guided step by step, driving the same APIs as the
+          pages below.</span>
+      </div>
+      <a class="btn pri" href="#/newproject">+ Create ML Project</a>
+    </div>`;
+
+    return hero + cta + banner + lifecycle + kpis
       + `<div class="grid g2">${modelCard}${deployCard}</div>`
       + `<div class="grid g2">${driftCard}${rtCard}</div>`
       + alertCard

@@ -178,6 +178,24 @@ async def upload_dataset(
     return payload
 
 
+@router.get("/limits", summary="Upload limits this deployment enforces")
+def dataset_limits() -> dict[str, Any]:
+    """What the upload endpoint will actually accept.
+
+    Exists so a client can state the real cap instead of carrying its own copy
+    of the constant, which is the sort of duplicate that goes stale silently
+    and then tells the user the wrong number. Declared before
+    ``/{version}/validation`` so the literal path wins over the parameterised
+    one.
+    """
+    return {
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "max_preview_rows": MAX_PREVIEW_ROWS,
+        "accepted_suffixes": sorted(ALLOWED_SUFFIXES),
+        "accepted_formats": ["CSV"],
+    }
+
+
 @router.get("/{version}/validation", summary="Validate one dataset version")
 def dataset_validation(version: str) -> dict[str, Any]:
     """Run the platform's validation engine over a registered version.

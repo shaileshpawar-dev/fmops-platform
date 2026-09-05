@@ -5,7 +5,9 @@
    for them, and the information they would show already lives in Deployments,
    Monitoring and System Health. */
 const NAV = [
-  { group:"Overview", items:[ ["overview","Command Center","▤"] ] },
+  { group:"Overview", items:[
+      ["overview","Command Center","▤"],
+      ["newproject","New ML Project","✦"] ] },
   { group:"Model lifecycle", items:[
       ["datasets","Datasets","▦"], ["automl","AutoML","✦"],
       ["training","Training","⚙"], ["evaluation","Evaluation","◎"],
@@ -76,6 +78,12 @@ async function render(){
 function wirePage(){
   document.querySelectorAll("[data-retry]").forEach(b =>
     b.onclick = () => { api.bust(); render(); });
+
+  /* A page may own its own wiring. Pages predating this hook are still wired
+     below; new ones should declare wire() and keep their handlers next to the
+     markup that needs them. */
+  const own = PAGES[route()];
+  if(own && typeof own.wire === "function") own.wire();
 
   const q = $("#auditq"), sel = $("#auditact");
   if(q){

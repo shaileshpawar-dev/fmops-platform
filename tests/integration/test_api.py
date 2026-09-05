@@ -508,6 +508,7 @@ def test_dashboard_console_has_every_navigation_section(api_client):
     body = _console_source(api_client)
     for page_id, label in (
         ("overview", "Command Center"),
+        ("newproject", "New ML Project"),
         ("datasets", "Datasets"),
         ("automl", "AutoML"),
         ("training", "Training"),
