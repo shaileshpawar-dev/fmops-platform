@@ -60,8 +60,8 @@ extra steps.
 | **Drift** | PSI + Jensen-Shannon + KS/χ², data/feature/prediction drift measured, **concept drift honestly reported as unavailable without labels** |
 | **Retraining** | drift/performance/volume/schedule triggers with cooldown, automatic compare-and-decide |
 | **LLMOps** | 5 provider adapters behind one interface, versioned prompts, tracing, evaluation with A/B, heuristic safety screen, token and cost accounting with budgets |
-| **Infrastructure** | Terraform (S3, ECR, IAM, CloudWatch, SNS, SageMaker), 3 Docker images, Compose stack, 3 GitHub Actions workflows |
-| **Tests** | 280 tests: unit, API integration, and end-to-end lifecycle |
+| **Infrastructure** | Terraform (VPC, ALB, ECS/Fargate, S3, ECR, IAM, CloudWatch, SNS, SageMaker model registry), 3 Docker images, Compose stack, 3 GitHub Actions workflows |
+| **Tests** | 289 tests: unit, API integration, and end-to-end lifecycle |
 
 ---
 
@@ -258,12 +258,14 @@ Implementation notes:
 - Where the backend has nothing to return, the page says `Data unavailable` or
   names the reason. It does not substitute placeholder numbers.
 
-> Screenshots are not committed to this repository. Run `make dev` and open
-> <http://localhost:8000/dashboard>, or use the deployed URL in the AWS section.
+> Screenshots are not committed to this repository. Run `make serve` and open
+> <http://localhost:8000/dashboard>, or browse the live deployment linked under
+> [Live deployment](#live-deployment).
 
 ## API
 
-60+ endpoints. The essentials:
+76 documented paths / 79 operations, as served by `/openapi.json`. The
+essentials:
 
 ```
 GET  /health  /health/live  /health/ready
@@ -348,11 +350,18 @@ Being explicit about limits is part of the engineering, not a disclaimer.
   table. Not a billing system. Unpriced models are flagged, not silently zeroed.
 - **SQLite serialises writes.** Fine for one API process; a multi-replica
   deployment should move to Postgres (one class to replace).
-- **No RBAC, no rate limiting, no TLS termination, no signed artifacts.** Real
-  gaps, listed in [`docs/deployment.md`](docs/deployment.md#security-posture).
-- **Terraform has not been applied against a live AWS account in this
-  repository's tests**, because that would create billable resources. It is
-  syntax-checked and `terraform validate`-ed in CI.
+- **Terraform is applied by hand, never by CI.** The configuration has been
+  applied against a live account -- the deployment under
+  [Live deployment](#live-deployment) is the result, 59 managed resources --
+  but CI only runs `fmt`, `validate` and `plan`. Applying creates billable
+  resources, so it stays a deliberate human action.
+- **The live model server is the in-process local provider, not an AWS ML
+  service.** The container runs on Fargate; the model is loaded and scored
+  inside that Python process. `deployment.provider=local`,
+  `tracking.backend=local`, `llm.provider=mock`, `aws.enabled=false` on the
+  running task. No SageMaker endpoint, no Bedrock call, no managed inference is
+  involved in serving a prediction, and the console reports the provider as
+  `local` rather than inferring "AWS" from where the container happens to run.
 - **The Docker images build and run; the full compose stack has not been run
   end to end.** All three images were built locally (Docker Desktop 29.7.2),
   all three run as uid 10001, and the training image was used to generate,
@@ -365,6 +374,27 @@ Being explicit about limits is part of the engineering, not a disclaimer.
   WAL needs shared-memory mapping that the Windows bind-mount driver does not
   provide. Compose uses named volumes, which work correctly; this only affects
   ad-hoc `-v /host/path:/app/artifacts` runs on Windows.
+
+### Limitations
+
+What the deployed system does not do. None of these are hidden behind a
+feature flag or a "coming soon" — they are the current shape of the thing.
+
+| Limitation | Why it is that way | What production would need |
+|---|---|---|
+| **One Fargate task, no autoscaling, no HA** | in-process routing state and a SQLite registry are not shared across replicas, so a second task would disagree with the first | move registry + inference log to Postgres, then scale out behind the same ALB |
+| **HTTP only, no TLS** | the ALB listener is `HTTP:80`; TLS needs a certificate, which needs a domain | ACM certificate + HTTPS listener + HTTP→HTTPS redirect |
+| **State lives inside the container** | datasets, model versions, deployments and the inference log are files and SQLite in the image's writable layer | EFS, RDS, or S3-backed artifact storage; every task-definition revision currently starts empty |
+| **Model serving is in-process** | the model is loaded and scored inside the API worker — real routing, not real infrastructure | the SageMaker provider already implements the same interface |
+| **LLM provider is a deterministic mock** | no key, no network, no cost; evaluation scores against it measure the harness, not a model | set `FMOPS_LLM__PROVIDER` to bedrock/anthropic/gemini and supply a key |
+| **AutoML fits binary classification only** | the model factory builds classifiers, the label is cast with `astype(int)`, evaluation reads `predict_proba[:, 1]` | new estimators, metrics and preprocessing |
+| **Training runs inside the API process** | FastAPI `BackgroundTasks`, so training competes with request handling for the task's 0.5 vCPU, and a run in flight is lost on restart | a real job runner — Step Functions, SageMaker Pipelines, or a queue + worker |
+| **Online scoring has one fixed request schema** | `POST /api/v1/predict` validates against `LoanApplicationFeatures`; a model trained on differently-shaped data cannot be exercised through it | per-model request schemas derived from the training frame |
+| **Hyperparameter search is unavailable on the deployed task** | the production profile sets `tuning.backend: sagemaker` while the task runs with `aws.enabled=false` and no boto3, so a run with `tune=true` fails with `ProviderUnavailableError` | set `FMOPS_TUNING__BACKEND=local_random` on the task, or enable the AWS backend properly |
+| **Uploads must clear the production validation profile** | `validation.min_rows` is 5000 there, so a small demo CSV is rejected by the gate the training pipeline uses | lower the threshold per environment, or upload a realistic dataset |
+| **No RBAC, no rate limiting, no signed artifacts** | a single API key gates every write; there are no roles and no per-caller quotas | an identity provider, per-route authorisation, request quotas, image/artifact signing |
+| **`/docs`, `/metrics` and `/api/v1/config` are public** | deliberate for a portfolio deployment so the platform can be inspected without credentials; secrets are redacted from all three | put them behind auth, or behind a private listener |
+
 
 ---
 
@@ -419,15 +449,119 @@ eval "$(terraform output -raw fmops_env_exports)"
 fmops aws status
 ```
 
-Provisions S3 (versioned, encrypted, TLS-only), ECR (immutable tags,
-scan-on-push), least-privilege IAM roles, GitHub OIDC, CloudWatch log
-groups/metric-filters/alarms/dashboard, SNS, and a SageMaker model package group.
+Provisions the runtime (VPC, ALB, ECS/Fargate) plus S3 (versioned, encrypted,
+TLS-only), ECR (immutable tags, scan-on-push), least-privilege IAM roles,
+GitHub OIDC, CloudWatch log groups/metric-filters/alarms/dashboard, SNS, and a
+SageMaker model package group.
 
 **It does not create a SageMaker endpoint** — endpoints bill per instance-hour
 and are created by the deployment pipeline against an approved model version.
 Infrastructure and model rollout are separate lifecycles on purpose.
 
 Details and cost warnings: [`terraform/README.md`](terraform/README.md).
+
+### Live deployment
+
+The platform is deployed and publicly reachable:
+
+**<http://fmops-dev-alb-1465000684.ap-south-1.elb.amazonaws.com/dashboard>**
+
+```
+                      Internet
+                          │  HTTP :80   (no TLS — see limitations)
+                          ▼
+        ┌─────────────────────────────────────────┐
+        │  ALB  fmops-dev-alb   (internet-facing) │
+        │  health check: GET /health/live         │
+        └────────────────────┬────────────────────┘
+                             │  :8000
+        ┌────────────────────▼────────────────────┐
+        │  ECS service  fmops-dev-api             │
+        │  Fargate · 512 CPU / 1024 MB · 1 task   │
+        │  uvicorn, 1 worker, non-root uid 10001  │
+        │                                         │
+        │  model server ── in-process (local)     │
+        │  registry ───── SQLite, in container    │
+        │  MLflow ─────── SQLite, in container    │
+        │  LLM ────────── mock (offline)          │
+        └─────────────────────────────────────────┘
+
+VPC 10.20.0.0/16 · 2 public subnets (ap-south-1a, ap-south-1b)
+No NAT gateway, no private subnets — the task pulls from ECR over an
+internet gateway with a public IP. NAT would roughly double the bill for
+no benefit at this size.
+```
+
+Region `ap-south-1`. Roughly **$34/month**, almost all of it the ALB.
+
+**What is and is not AWS.** The container runs on AWS. The *model* does not run
+on an AWS ML service — it is loaded and scored inside the same Python process
+that serves the HTTP request. On the running task:
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `deployment.provider` | `local` | in-process weighted routing, not a SageMaker endpoint |
+| `tracking.backend` | `local` | SQLite in the container, not a hosted MLflow |
+| `tracking.registry_backend` | `local` | SQLite, not the SageMaker model registry |
+| `llm.provider` | `mock` | deterministic offline stub, not Bedrock |
+| `aws.enabled` | `false` | no boto3 calls on any request path |
+
+`GET /api/v1/config` returns these live, and the console shows the provider as
+`local`. Nothing infers "AWS" from where the container happens to run.
+
+### Trying it
+
+**Browsing the live deployment** needs nothing. Reads are anonymous, so the
+Command Center, the registry, the leaderboards, drift, the audit log and
+`/docs` all open directly. Start at
+[`/dashboard`](http://fmops-dev-alb-1465000684.ap-south-1.elb.amazonaws.com/dashboard),
+then walk **New ML Project** — every step shows the real state of a model that
+was trained, gated, promoted and deployed through that workflow.
+
+**Writes on the live deployment require an API key**, which is not published.
+Upload, train, deploy and predict will return 401 there. That is deliberate: an
+unauthenticated write endpoint on a public URL is a liability, not a demo. To
+drive the whole lifecycle yourself, run it locally:
+
+```bash
+make setup
+make demo      # generate → validate → train → gate → promote → deploy, ~5 min
+make serve     # http://localhost:8000/dashboard
+```
+
+Locally `auth_backend` defaults to `none`, so every button in the console works
+and **New ML Project** runs end to end against your own data.
+
+Because state is container-local, the live deployment starts empty after each
+task-definition revision and `/health/ready` returns 503 until a model exists.
+If you find it bare, that is what happened — the local path above is the
+reliable way to see the full lifecycle.
+
+No screenshots are committed. The console is the screenshot, and it renders
+from live API responses rather than fixtures, so a stale image can never
+misrepresent what the platform actually returns.
+
+### Deploying a new revision
+
+```bash
+SHA=$(git rev-parse --short=7 HEAD)
+docker build -f docker/api.Dockerfile -t "$ECR/api:$SHA" .
+aws ecr get-login-password --region ap-south-1 \
+  | docker login --username AWS --password-stdin "$ECR"
+docker push "$ECR/api:$SHA"
+# register a task-definition revision with only the image changed, then:
+aws ecs update-service --cluster fmops-dev-cluster --service fmops-dev-api \
+  --task-definition fmops-dev-api:<revision>
+aws ecs wait services-stable --cluster fmops-dev-cluster --services fmops-dev-api
+```
+
+Image tags are commit SHAs and nothing else — see
+[`docs/deployment.md`](docs/deployment.md#image-tags).
+
+> **Every task-definition revision resets platform state.** Datasets, model
+> versions, deployments and the inference log live inside the container, so a
+> new revision starts empty. This is a property of the storage choice, not a
+> bug; see [Limitations](#limitations).
 
 ---
 
@@ -440,9 +574,10 @@ Details and cost warnings: [`terraform/README.md`](terraform/README.md).
 | [`datasets.md`](docs/datasets.md) | upload, content-addressed versions, validation, preview |
 | [`training.md`](docs/training.md) | starting runs from the API, statuses, execution model |
 | [`automl.md`](docs/automl.md) | profiling, target inference, candidate ranking, the gate |
+| [`workflow.md`](docs/workflow.md) | the guided build workflow: each step's API, and what it does not pretend |
 | [`llmops.md`](docs/llmops.md) | prompts, providers, evaluation, **safety limitations**, cost |
 | [`monitoring.md`](docs/monitoring.md) | metrics, the drift taxonomy, statistics, SLOs |
-| [`deployment.md`](docs/deployment.md) | local, Docker, AWS, production checklist, security posture |
+| [`deployment.md`](docs/deployment.md) | local, Docker, **ECS/Fargate runtime**, image tags, checklist, security posture |
 | [`troubleshooting.md`](docs/troubleshooting.md) | every error code and what to do |
 
 ---

@@ -257,6 +257,32 @@ class in its owning module, so moving to Postgres/RDS means replacing one class
 process and the traffic volumes this platform is demonstrated at; a multi-replica
 production deployment should move to Postgres. See `docs/deployment.md`.
 
+**On the deployed task this state is ephemeral.** The AWS deployment runs one
+Fargate task with no mounted volume, so `artifacts/` lives in the container's
+writable layer: every task-definition revision starts from an empty registry
+and `/health/ready` returns 503 until a model is promoted again. That is a
+consequence of choosing container-local storage, not of SQLite -- the same
+database on EFS or RDS would persist. It is stated wherever it could mislead
+rather than left for someone to discover after a deploy.
+
+## Deployed runtime
+
+```
+Internet ──HTTP:80──▶ ALB ──:8000──▶ ECS/Fargate task (1) ──▶ uvicorn (1 worker)
+                                                               │
+                                          in-process model ◀───┤
+                                          SQLite + MLflow  ◀───┤
+                                          mock LLM         ◀───┘
+```
+
+Two public subnets across two AZs (an ALB requires two), no NAT gateway, no
+private subnets. The model is scored **inside the API process**: the container
+runs on AWS, the model does not run on an AWS ML service. `provider=local` is
+what `/api/v1/config` reports, and the console shows that rather than inferring
+"AWS" from the container's location. The SageMaker provider implements the same
+`DeploymentProvider` interface and is the path to managed serving, but it is not
+what is deployed. See [`deployment.md`](deployment.md#ecs--fargate--what-is-actually-deployed).
+
 ## Request path
 
 ```mermaid

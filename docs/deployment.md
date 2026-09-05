@@ -72,6 +72,14 @@ So:
 - `cd.yml` publishes exactly one tag per image, `sha-<short commit>`, and every
   consumer -- the trivy scan, the ECS deploy, the SageMaker training image --
   references it.
+- **Images deployed by hand are tagged with the bare commit SHA**, short or
+  full, rather than the `sha-` prefix `cd.yml` uses. The registry therefore
+  holds all three forms. Every one of them is an immutable tag naming exactly
+  one commit, which is the property that matters; the prefix is a CI
+  convention, not a rule. `aws ecr describe-images --repository-name
+  fmops-dev/api` lists what is actually there, and the running task definition
+  pins a digest, so "what is deployed" is never ambiguous regardless of which
+  form was used.
 - The Terraform `container_image` variable rejects `:latest` and other moving
   tags with a validation rule, so a mutable reference cannot reach a task
   definition even by hand.
@@ -181,11 +189,84 @@ terraform plan  -var environment=staging
 terraform apply -var environment=staging
 ```
 
-Creates S3, ECR, IAM roles, CloudWatch log groups/alarms/dashboard, SNS, and a
-SageMaker model package group. **It does not create a SageMaker endpoint** —
+Creates the runtime (VPC, ALB, ECS cluster/service/task definition) plus S3,
+ECR, IAM roles, CloudWatch log groups/alarms/dashboard, SNS, and a SageMaker
+model package group. **It does not create a SageMaker endpoint** —
 endpoints bill per instance-hour and are created by the deployment pipeline
 against an approved model version. Infrastructure and model rollout are separate
 lifecycles.
+
+### ECS / Fargate — what is actually deployed
+
+This is the path the live deployment uses. The SageMaker path below it is the
+alternative the provider interface supports; it is not what runs today.
+
+```
+Internet ──HTTP:80──▶ ALB fmops-dev-alb ──:8000──▶ ECS service fmops-dev-api
+                      health: /health/live          Fargate 512 CPU / 1024 MB
+                                                    1 task · uvicorn · 1 worker
+```
+
+VPC `10.20.0.0/16` with two public subnets (`ap-south-1a`, `ap-south-1b` — an
+ALB requires two AZs). **No NAT gateway and no private subnets:** the task runs
+in a public subnet with a public IP and pulls from ECR through the internet
+gateway. A NAT gateway would add roughly the cost of the rest of the stack
+combined for no benefit at one task.
+
+The container serves the model **in-process**. `deployment.provider=local`,
+`tracking.backend=local`, `llm.provider=mock`, `aws.enabled=false` on the
+running task — no boto3 call happens on any request path, and no AWS ML service
+is involved in a prediction.
+
+#### Rolling out a revision
+
+```bash
+SHA=$(git rev-parse --short=7 HEAD)
+docker build -f docker/api.Dockerfile -t "$ECR_REGISTRY/api:$SHA" .
+docker push "$ECR_REGISTRY/api:$SHA"
+
+# Register a task-definition revision that differs only in the image, then:
+aws ecs update-service --cluster fmops-dev-cluster --service fmops-dev-api \
+  --task-definition fmops-dev-api:<revision>
+aws ecs wait services-stable --cluster fmops-dev-cluster --services fmops-dev-api
+aws elbv2 describe-target-health --target-group-arn "$TG_ARN"
+```
+
+Rollback is the same call naming an earlier revision. Every previously deployed
+image stays pullable by its own SHA tag.
+
+> **`terraform apply` can silently undo a hand-rolled deployment.** Terraform
+> owns `aws_ecs_service.task_definition`, and its idea of the right revision
+> comes from the `container_image` variable. Update the service with
+> `aws ecs update-service` and Terraform now sees drift; the next apply points
+> the service back at the image in `terraform.tfvars` — an older build, with no
+> warning beyond the plan output.
+>
+> Two habits avoid it:
+>
+> 1. Update `container_image` in `terraform.tfvars` whenever you deploy by hand.
+> 2. **Read the plan.** A line like
+>    `~ task_definition = "...:9" -> "...:6"` is a rollback, not a no-op.
+>
+> `terraform plan` is safe to run at any time and is the only reliable way to
+> see this before it happens.
+
+#### What a new revision costs you
+
+**Platform state does not survive it.** Datasets, model versions, deployments
+and the inference log live in the container's writable layer, so a new task
+starts empty and `/health/ready` returns 503 until a model is trained and
+promoted again. Persisting them means EFS, RDS or S3-backed artifacts — see
+the limitations table in the README.
+
+#### Running cost
+
+| Resource | Monthly |
+|---|---|
+| ALB | ~$18 + LCU |
+| Fargate 0.5 vCPU / 1 GB, 1 task | ~$15 |
+| ECR, CloudWatch logs, S3 | pennies |
+| **Total** | **~$34** |
 
 ### 2. Point the platform at it
 
@@ -198,11 +279,12 @@ fmops aws status
 
 ```bash
 aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-docker build -f docker/inference.Dockerfile -t "$ECR_REGISTRY/inference:v1" .
-docker push "$ECR_REGISTRY/inference:v1"
+SHA=$(git rev-parse --short=7 HEAD)
+docker build -f docker/inference.Dockerfile -t "$ECR_REGISTRY/inference:$SHA" .
+docker push "$ECR_REGISTRY/inference:$SHA"
 
 export FMOPS_DEPLOYMENT__PROVIDER=sagemaker
-export FMOPS_AWS__SAGEMAKER_TRAINING_IMAGE="$ECR_REGISTRY/inference:v1"
+export FMOPS_AWS__SAGEMAKER_TRAINING_IMAGE="$ECR_REGISTRY/inference:$SHA"
 python -m pipelines.deployment_pipeline --strategy canary
 ```
 

@@ -40,3 +40,25 @@ cost_center = "ml-platform"
 additional_tags = {
   Owner = "ml-platform"
 }
+
+# ---------------------------------------------------------------------------
+# ECS / Fargate runtime -- the ALB + service that actually runs the API.
+# ---------------------------------------------------------------------------
+enable_ecs_service = true
+
+# REQUIRED when enable_ecs_service = true. A commit-SHA tag or a @sha256
+# digest; moving tags are rejected by a validation rule.
+#
+#   container_image = "<account>.dkr.ecr.<region>.amazonaws.com/fmops-dev/api:a1b2c3d"
+#
+# IMPORTANT: this value is what Terraform believes is deployed. If a revision
+# was rolled out by hand (`aws ecs update-service --task-definition ...:N`)
+# without updating this, the next `terraform apply` will point the service back
+# at the image named here -- a silent rollback. Check `terraform plan` for a
+# task_definition change before applying, and keep this in step with what is
+# actually running.
+container_image = ""
+
+ecs_task_cpu      = 512
+ecs_task_memory   = 1024
+ecs_desired_count = 1
