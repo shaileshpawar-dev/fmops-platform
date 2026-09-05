@@ -122,6 +122,7 @@ def test_workflow_drives_only_endpoints_that_exist(api_client):
         "/api/v1/models",
         "/api/v1/models/algorithms",
         "/api/v1/models/{name}/versions",
+        "/api/v1/models/{name}/versions/{version}",
         "/api/v1/models/{name}/versions/{version}/evaluate-gate",
         "/api/v1/deployments",
         "/api/v1/deployments/current",
@@ -150,6 +151,39 @@ def test_workflow_states_what_the_platform_cannot_do(api_client):
     assert "registration happens inside the run" in body
     assert "It is not concept drift" in body
     assert "binary classification" in body
+
+
+def test_workflow_distinguishes_pending_manual_from_rejected(api_client):
+    """``pending_manual`` is not a rejection and must not be shown as one.
+
+    ``evaluate_approval`` returns PENDING_MANUAL when every automated check
+    passed but ``require_manual_approval`` is on -- which is how the deployed
+    environment is configured. Collapsing that into "not eligible" tells the
+    user a threshold failed when none did.
+    """
+    from app.schemas.common import ApprovalDecision
+
+    assert ApprovalDecision.PENDING_MANUAL.value == "pending_manual"
+
+    body = _flat(_console_source(api_client))
+    assert "pending_manual" in body, "the workflow does not handle the pending_manual decision"
+    assert "AWAITING MANUAL APPROVAL" in body
+
+
+def test_deployability_follows_the_stage_rule_the_api_enforces(api_client):
+    """The workflow must gate step 08 on the same condition the API does.
+
+    ``DeploymentManager`` accepts a version whose stage is deployable. Gating
+    the UI on the gate *decision* instead would both block a legitimate
+    Staging deployment and imply a restriction the platform does not have.
+    """
+    from app.deployment.manager import DEPLOYABLE_STAGES
+
+    body = _console_source(api_client)
+    for stage in DEPLOYABLE_STAGES:
+        assert (
+            f'"{stage.value}"' in body
+        ), f"workflow does not treat {stage.value} as deployable"
 
 
 def test_workflow_never_offers_a_gate_override(api_client):

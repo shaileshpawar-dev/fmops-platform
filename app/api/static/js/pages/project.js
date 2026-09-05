@@ -820,13 +820,25 @@ async function stepApproval(){
     || (recorded && recorded.decision) || null;
   const approved = decision === "approved";
 
-  const verdict = decision ? `<div class="verdict ${approved ? "pass" : "fail"}">
-      <span class="mark" aria-hidden="true">${approved ? "&check;" : "&times;"}</span>
-      <span class="txt"><b>${approved ? "APPROVED FOR PRODUCTION" : "NOT ELIGIBLE FOR PRODUCTION"}</b>
-        <span>${approved
-          ? "Every blocking check passed. Deployment is unlocked."
-          : "At least one blocking check failed. Production deployment stays locked."}</span>
-      </span></div>`
+  /* Three outcomes, not two. An environment with require_manual_approval on
+     returns pending_manual for a candidate that cleared every automated check,
+     and calling that "not eligible" would be a straight misreading: nothing
+     failed, a human simply has not signed it off yet. */
+  const pending = decision === "pending_manual";
+  const verdictClass = approved ? "pass" : pending ? "warn" : "fail";
+  const verdictMark = approved ? "&check;" : pending ? "&#9203;" : "&times;";
+  const verdictTitle = approved ? "APPROVED FOR PRODUCTION"
+    : pending ? "AWAITING MANUAL APPROVAL" : "NOT ELIGIBLE FOR PRODUCTION";
+  const verdictBody = approved
+    ? "Every blocking check passed."
+    : pending
+      ? "Every automated check passed. This environment requires a human to promote the "
+        + "version before it reaches Production."
+      : "At least one blocking check failed. Promotion to Production is refused.";
+
+  const verdict = decision ? `<div class="verdict ${verdictClass}">
+      <span class="mark" aria-hidden="true">${verdictMark}</span>
+      <span class="txt"><b>${verdictTitle}</b><span>${verdictBody}</span></span></div>`
     : `<div class="note" style="border-color:var(--warn-line);background:var(--warn-bg)">
         <b>The gate outcome could not be read.</b>
         <div style="font-size:12.5px;margin-top:6px">${needsKey
@@ -901,13 +913,22 @@ async function stepApproval(){
       run executed. The panels above re-run it against the thresholds in force now.</p>`,
     { flush:true }) : "";
 
+  /* Whether the next step can do anything is the deployment API's rule, not
+     this page's: it accepts a version whose stage is deployable and refuses
+     one that is not. A rejected candidate stays in Development and is refused
+     there; a pending_manual candidate registered into Staging is genuinely
+     deployable, and pretending otherwise would be inventing a restriction the
+     platform does not have. */
   const nav = `<div class="wiznav">
-    ${approved
-      ? `<button class="btn pri" data-goto="8">Continue to deployment</button>`
-      : `<button class="btn pri" data-goto="4">Train another candidate</button>`}
+    ${decision === "rejected"
+      ? `<button class="btn pri" data-goto="4">Train another candidate</button>
+         <button class="btn" data-goto="8">See deployment status</button>`
+      : `<button class="btn pri" data-goto="8">Continue to deployment</button>`}
     <button class="btn" data-goto="6">Back</button>
-    ${!approved ? `<span class="dim" style="font-size:12.5px">Deployment stays locked until a
-      candidate satisfies the configured policy.</span>` : ""}</div>`;
+    ${decision === "rejected" ? `<span class="dim" style="font-size:12.5px">A rejected
+      candidate stays in Development, which is not a deployable stage.</span>` : ""}
+    ${pending ? `<span class="dim" style="font-size:12.5px">Promotion to Production needs a
+      human; deploying the Staging version does not.</span>` : ""}</div>`;
 
   return wizFrame(7, "Model readiness",
     `The backend owns this decision. This page reads the gate; it cannot override it, and there
@@ -923,7 +944,19 @@ async function stepDeploy(){
     unavailable("Nothing has been registered yet."));
 
   await ensureModelName();
-  const approved = PRJ.gateDecision === "approved";
+
+  /* Deployability is a property of the version's stage, which is what the
+     deployment API actually checks -- read it back rather than inferring it
+     from the gate decision this browser happens to remember. */
+  const DEPLOYABLE = ["Staging", "Production", "Validation"];
+  let stage = null, stageError = null;
+  try {
+    const v = await api.get(`/api/v1/models/${encodeURIComponent(PRJ.modelName)}`
+      + `/versions/${PRJ.modelVersion}`, 0);
+    stage = v.stage;
+  } catch(e){ stageError = e.message; }
+  const approved = DEPLOYABLE.includes(String(stage));
+
   let current = null;
   try { current = await api.get("/api/v1/deployments/current", 5000); } catch(e){ /* below */ }
 
@@ -959,15 +992,21 @@ async function stepDeploy(){
     : `<div class="verdict fail">
         <span class="mark" aria-hidden="true">&#128274;</span>
         <span class="txt"><b>DEPLOYMENT LOCKED</b>
-          <span>This version has not cleared the approval gate.</span></span></div>
-      <p style="margin:0;font-size:13px;line-height:1.6">The deployment API refuses a version
-        that is not in a deployable stage, and this workflow does not offer the override that
-        would bypass it. Train a candidate that satisfies the policy, or promote an eligible
+          <span>${stageError
+            ? "The version's stage could not be read."
+            : `Version ${esc(String(PRJ.modelVersion))} is in
+               <b>${esc(stage || "an unknown stage")}</b>, which is not deployable.`}</span>
+        </span></div>
+      <p style="margin:0;font-size:13px;line-height:1.6">The deployment API accepts only
+        ${DEPLOYABLE.map(s => `<span class="mono">${esc(s)}</span>`).join(", ")}. A candidate the
+        approval gate rejected stays in <span class="mono">Development</span> and is refused
+        there. The API does take an override that skips this check; <b>this workflow never
+        sends it</b>. Train a candidate that satisfies the policy, or promote an eligible
         version from the <a href="#/models">Model Registry</a>.</p>`;
 
   return wizFrame(8, "Deploy",
     `Rolling a version onto the serving endpoint. The strategy decides how traffic moves; the
-     approval gate decides whether it moves at all.`,
+     version's stage decides whether it moves at all, and the approval gate decides the stage.`,
     prjContext() + state + card("Roll out", form, { flush:true }) + `<div class="wiznav">
       ${PRJ.deployedVersion ? `<button class="btn pri" data-goto="9">Continue to predictions</button>` : ""}
       <button class="btn" data-goto="7">Back</button></div>`);
