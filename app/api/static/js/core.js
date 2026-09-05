@@ -266,3 +266,184 @@ async function renderSideFoot(){
     <p class="foothint">Hosted on ECS/Fargate. AWS service integration is reported
       from the running configuration, not assumed from where it runs.</p>`;
 }
+
+/* ==========================================================================
+ * Signature components
+ *
+ * Each takes an API response and renders it. None of them holds an idea of
+ * progress the backend has not confirmed: where a source says nothing, the
+ * component renders "unknown" rather than a hopeful default, and a dash is
+ * never a zero.
+ * ========================================================================== */
+
+/* ---- Production Health Strip --------------------------------------------- *
+ * Six units over one /api/v1/dashboard response. The distinction that matters
+ * most is measurable vs not-measurable, so every unit that cannot be computed
+ * carries the reason underneath it instead of a number.
+ */
+function healthStrip(d){
+  const model = d.model || {}, sys = d.system || {}, dep = d.deployment || {},
+        drift = d.drift || {}, lp = sys.live_performance || {};
+  const m = model.metrics || {};
+  const u = (k, v, meta, kind) =>
+    `<div class="u"><div class="k">${esc(k)}</div>
+      <div class="v ${kind || ""}">${v}</div>
+      <div class="m">${meta || "&nbsp;"}</div></div>`;
+
+  const serving = dep.available && dep.current_version != null
+    ? `v${dep.current_version}` : (model.available && model.current_version != null
+      ? `v${model.current_version}` : NA);
+  const servingMeta = dep.available && dep.state
+    ? esc(String(dep.state)) : esc(model.current_stage || "not deployed");
+
+  const latOk = sys.latency_slo_met !== false;
+  const errOk = sys.error_slo_met !== false;
+  const driftKnown = drift.available && drift.drift_detected != null;
+
+  return `<div class="hstrip">
+    ${u("Serving", serving, servingMeta)}
+    ${u("ROC-AUC", num(m.roc_auc, 4), "offline, at registration")}
+    ${u("p95 latency", sys.latency_p95_ms != null ? ms(sys.latency_p95_ms) : NA,
+        sys.slo_latency_ms != null ? `SLO ${sys.slo_latency_ms} ms` : "no SLO set",
+        sys.latency_p95_ms == null ? "na" : (latOk ? "ok" : "bad"))}
+    ${u("Error rate", sys.error_rate != null ? pct(sys.error_rate, 2) : NA,
+        sys.slo_error_rate != null ? `SLO ${(sys.slo_error_rate*100).toFixed(2)}%` : "no SLO set",
+        sys.error_rate == null ? "na" : (errOk ? "ok" : "bad"))}
+    ${u("Drift", driftKnown ? (drift.drift_detected ? "DETECTED" : "STABLE") : NA,
+        driftKnown ? `${(drift.drifted_features||[]).length} feature(s)` : "no scan yet",
+        driftKnown ? (drift.drift_detected ? "warn" : "ok") : "na")}
+    ${u("Live F1", lp.available ? num(lp.f1, 4) : NA,
+        lp.available ? "from returned labels" : "needs labels",
+        lp.available ? "" : "na")}
+  </div>`;
+}
+
+/* ---- Lifecycle Rail ------------------------------------------------------ *
+ * Ten stops, each derived from a named source. The caller builds `stops` from
+ * real responses; this only renders. A stop whose source did not answer is
+ * todo, never done.
+ */
+const LIFECYCLE_STOPS = ["Dataset","Train","Evaluate","Gate","Approve",
+                         "Promote","Deploy","Monitor","Drift","Retrain"];
+
+function lifecycleRail(stops){
+  return `<div class="lcrail">` + LIFECYCLE_STOPS.map((label, i) => {
+    const s = (stops && stops[i]) || {};
+    const state = ["done","now","fail","block","todo"].includes(s.state) ? s.state : "todo";
+    const glyph = state === "done" ? "✓" : state === "fail" ? "✕"
+      : state === "block" ? "!" : state === "now" ? "●" : String(i+1);
+    const joined = i < LIFECYCLE_STOPS.length - 1
+      ? `<div class="join ${state === "done" ? "done" : ""}"></div>` : "";
+    return `<div class="st ${state}" title="${esc(s.detail || label)}">
+        <span class="pip">${glyph}</span>
+        <span class="lbl2">${esc(label)}</span>
+        <span class="val">${s.value != null ? esc(String(s.value)) : "&mdash;"}</span>
+      </div>${joined}`;
+  }).join("") + `</div>`;
+}
+
+/* ---- Promotion Rail ------------------------------------------------------ *
+ * DEV to VAL to STAGING to PROD. Occupants come from the version list, and the
+ * last transition into each stage from /models/{name}/history.
+ */
+const STAGES = ["Development","Validation","Staging","Production"];
+
+function promotionRail(versions, history){
+  const vs = versions || [], hist = history || [];
+  return `<div class="prail">` + STAGES.map(stage => {
+    const here = vs.filter(v => v.stage === stage);
+    const last = hist.find(h => h.to_stage === stage);
+    const cls = (stage === "Production" && here.length) ? "on" : "past";
+    const occupants = here.length ? here.map(v => `v${v.version}`).join(" · ") : "&mdash;";
+    let note;
+    if(here.length && last) note = `${last.actor || "?"} · ${last.reason || ""}`;
+    else if(here.length) note = `${here.length} version(s) held here`;
+    else if(last) note = `last transit ${String(last.created_at || "").slice(0,19).replace("T"," ")}`;
+    else note = "never occupied";
+    return `<div class="seg ${cls}">
+      <div class="s">${esc(stage)}</div>
+      <div class="v">${occupants}</div>
+      <div class="w" title="${esc(note)}">${esc(note)}</div></div>`;
+  }).join("") + `</div>`;
+}
+
+/* ---- Model Version Rail -------------------------------------------------- *
+ * Lineage as navigation. A rejected version stays visibly rejected: the point
+ * of this strip is that the registry must not look artificially green.
+ */
+function versionRail(versions, current, metric){
+  const vs = (versions || []).slice().sort((a,b) => b.version - a.version);
+  if(!vs.length) return emptyState("No versions registered.");
+  const key = metric || "roc_auc";
+  return `<div class="vrail">` + vs.map(v => {
+    const st = String(v.stage || "");
+    const rejected = String(v.status || "").toLowerCase() === "rejected";
+    const cls = rejected ? "rejected" : st === "Production" ? "prod"
+      : (st === "Staging" || st === "Validation") ? "stage" : "";
+    const on = String(v.version) === String(current) ? "on" : "";
+    const score = (v.metrics || {})[key];
+    return `<a class="${cls} ${on}" href="#/models/${encodeURIComponent(v.version)}"
+        title="${esc(v.algorithm || "")}">
+      <div class="vn">v${esc(String(v.version))}</div>
+      <div class="vs">${esc(rejected ? "rejected" : st || "unknown")}</div>
+      <div class="vm">${typeof score === "number" ? score.toFixed(4) : "&mdash;"}</div></a>`;
+  }).join("") + `</div>`;
+}
+
+/* ---- Evidence Table ------------------------------------------------------ *
+ * observed / required / verdict, one row per gate check. Colour appears only
+ * in the verdict column, so a failing row is findable in a long list.
+ */
+function evidenceTable(checks){
+  const cs = checks || [];
+  if(!cs.length) return emptyState("No gate checks recorded.");
+  const fmt = v => v == null ? NA : (typeof v === "number" ? v.toFixed(4) : esc(String(v)));
+  return `<div class="scroll"><table class="evid">
+    <thead><tr><th>Check</th><th class="num">Observed</th><th class="num">Required</th>
+      <th>Blocking</th><th>Verdict</th></tr></thead>
+    <tbody>${cs.map(c => `<tr class="${c.passed ? "" : "failed"}">
+      <td class="mono">${esc(c.name)}</td>
+      <td class="obs">${fmt(c.observed)}</td>
+      <td class="req">${fmt(c.threshold)}</td>
+      <td>${c.blocking ? badge("blocking","warn") : badge("advisory","mute")}</td>
+      <td>${c.passed ? badge("pass","ok") : badge("fail","bad")}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+/* ---- Attention Queue ----------------------------------------------------- *
+ * Open alerts, newest first. The empty state names what is being watched
+ * rather than declaring everything fine.
+ */
+function attentionQueue(alerts, opts){
+  const o = opts || {};
+  const list = (alerts || []).filter(a => o.includeAcknowledged || !a.acknowledged);
+  if(!list.length) return `<div class="state">
+    <div class="big">Nothing needs attention</div>
+    Latency and error-rate SLOs, drift scans and retraining triggers all raise alerts
+    here. None are currently open.</div>`;
+  return `<div class="aq">` + list.slice(0, o.limit || 8).map(a => {
+    const sev = String(a.severity || "info").toLowerCase();
+    return `<div class="row">
+      <span class="sev ${esc(sev)}"></span>
+      <div>
+        <div class="ttl">${esc(a.title || a.name || a.kind || "Alert")}</div>
+        <div class="msg">${esc(a.message || "")}</div>
+        <div class="meta">${esc(sev)} · ${when(a.created_at)}${
+          a.source ? " · " + esc(a.source) : ""}</div>
+      </div>
+      ${a.acknowledged ? badge("acknowledged","mute")
+        : `<button class="btn" data-act="ack" data-id="${esc(a.id)}">Acknowledge</button>`}
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+/* ---- Section heading ----------------------------------------------------- *
+ * The eyebrow is a real ordinal in a real sequence, not decoration: these
+ * number the reading order of a page that has one.
+ */
+function sect2(n, title, sub){
+  return `<div class="shead">
+    ${n ? `<span class="n">${esc(n)}</span>` : ""}
+    <h3>${esc(title)}</h3>
+    ${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>`;
+}

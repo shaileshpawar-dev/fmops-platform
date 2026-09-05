@@ -90,10 +90,16 @@ def test_a_real_version_still_resolves_through_the_catch_all(api_client, valid_f
 # The workflow page
 # --------------------------------------------------------------------------- #
 def test_command_center_offers_a_way_into_the_workflow(api_client):
-    """A new user should not have to know which page to start on."""
+    """A new user should not have to know which page to start on.
+
+    The call to action moved from the Command Center body into the sidebar,
+    where it sits above the navigation and is reachable from every page rather
+    than only from the landing one.
+    """
     body = _console_source(api_client)
     assert 'href="#/newproject"' in body
-    assert "Create ML Project" in body
+    assert "New ML Project" in body
+    assert "navcta" in body, "the workflow call to action is no longer in the sidebar"
 
 
 def test_workflow_drives_only_endpoints_that_exist(api_client):

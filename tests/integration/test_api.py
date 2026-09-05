@@ -489,7 +489,12 @@ def _console_source(api_client) -> str:
     page = api_client.get("/dashboard")
     assert page.status_code == 200
     sources = [page.text]
-    for path in re.findall(r'src="(/static/js/[^"]+)"', page.text):
+    # Stylesheets are followed too. The console embeds its typefaces as data
+    # URIs, so the no-egress guarantee has to hold over the CSS as well -- that
+    # is exactly where a CDN font would reappear if one ever crept back in.
+    referenced = re.findall(r'src="(/static/js/[^"]+)"', page.text)
+    referenced += re.findall(r'href="(/static/css/[^"]+)"', page.text)
+    for path in referenced:
         asset = api_client.get(path)
         assert asset.status_code == 200, f"console references {path} but it is not served"
         sources.append(asset.text)
@@ -507,30 +512,44 @@ def test_dashboard_console_has_every_navigation_section(api_client):
     """
     body = _console_source(api_client)
     for page_id, label in (
+        # CONTROL
         ("overview", "Command Center"),
-        ("newproject", "New ML Project"),
-        ("datasets", "Datasets"),
-        ("automl", "AutoML"),
-        ("training", "Training"),
-        ("evaluation", "Evaluation"),
-        ("models", "Model Registry"),
-        ("experiments", "Experiments"),
+        ("models", "Models"),
         ("deployments", "Deployments"),
-        ("monitoring", "Monitoring"),
-        ("drift", "Drift Detection"),
+        ("incidents", "Incidents"),
+        # BUILD
+        ("datasets", "Datasets"),
+        ("training", "Training"),
+        ("automl", "AutoML"),
+        ("experiments", "Experiments"),
+        # OPERATE
+        ("monitoring", "Observability"),
+        ("drift", "Drift"),
         ("retraining", "Retraining"),
-        ("champion", "Champion / Challenger"),
-        ("audit", "Audit Log"),
+        # GOVERN
+        ("gates", "Quality Gates"),
+        ("audit", "Audit"),
+        ("runtime", "Runtime"),
+        # LLMOPS
         ("llm-overview", "Overview"),
         ("llm-prompts", "Prompts"),
         ("llm-evals", "Evaluations"),
         ("llm-cost", "Tokens & Cost"),
         ("llm-safety", "Safety"),
-        ("system", "System Health"),
     ):
         registration = f"PAGES.{page_id} =" if "-" not in page_id else f'PAGES["{page_id}"] ='
         assert registration in body, f"console has no page registered for {page_id}"
         assert f'["{page_id}","{label}"' in body, f"sidebar has no entry for {page_id}"
+
+    # The guided workflow is reached from a standing call to action rather than
+    # a nav row, so it is registered and linked but has no NAV tuple.
+    assert "PAGES.newproject =" in body
+    assert 'href="#/newproject"' in body, "the sidebar CTA no longer links the workflow"
+
+    # Evaluation and Champion/Challenger became a tab and a page rather than
+    # disappearing: assert the capability survived the move.
+    assert "mvEvaluation" in body, "the model page lost its Evaluation tab"
+    assert "Champion / challenger" in body, "the champion comparison was dropped"
 
 
 def test_dashboard_console_states_its_limitations(api_client):

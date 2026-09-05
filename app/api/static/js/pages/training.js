@@ -131,63 +131,12 @@ function renderRunDetail(run){
     ${metrics}`) + tuning + approval;
 }
 
-PAGES.evaluation = {
-  title: "Evaluation",
-  intro: "Offline evaluation for every registered version, and the live quality of the serving model where ground-truth labels exist.",
-  async render(){
-    const r = await loadAll({ dash:"/api/v1/dashboard", runs:"/api/v1/training/runs?limit=50",
-      perf:"/api/v1/monitoring/performance" }, 6000);
-    const m = (r.dash.ok ? r.dash.data.model : {}) || {};
-    const met = m.metrics || {};
-    const versions = m.versions || [];
-
-    const serving = m.available ? card("Serving version - offline evaluation", `
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
-        <b class="mono">${esc(m.model_name)}</b> v${esc(m.current_version)}
-        ${badge(m.current_stage,"info")}
-        <span class="dim mono">${esc(m.algorithm||"")}</span></div>
-      <div class="grid g4">
-        ${kpi("Accuracy", num(met.accuracy))}${kpi("Precision", num(met.precision))}
-        ${kpi("Recall", num(met.recall))}${kpi("F1", num(met.f1))}</div>
-      <div class="grid g4" style="margin-top:12px">
-        ${kpi("ROC-AUC", num(met.roc_auc))}${kpi("PR-AUC", num(met.pr_auc))}
-        ${kpi("Log loss", num(met.log_loss))}${kpi("Brier", num(met.brier_score))}</div>
-      <div class="note" style="margin-top:14px">These are <b>offline</b> metrics from the held-out
-        evaluation set, not production accuracy.</div>`)
-      : unavailable("No model registered.");
-
-    const live = sect(r.perf, p => card("Live quality (from labels)", p.available ? `
-        <div class="grid g4">
-          ${kpi("Accuracy", num(p.accuracy))}${kpi("Precision", num(p.precision))}
-          ${kpi("Recall", num(p.recall))}${kpi("ROC-AUC", num(p.roc_auc))}</div>
-        <p class="dim" style="margin:12px 0 0">From ${int(p.labelled_samples)} labelled production rows.</p>`
-      : `<div class="state"><div class="big">Ground-truth labels required</div>
-         ${esc(p.detail||"")}</div>`), "performance");
-
-    const byVersion = card("Registered versions", table([
-      { label:"Version", render:v => `<b class="mono">v${esc(v.version)}</b>` },
-      { label:"Stage", render:v => badge(v.stage||"None", v.stage==="Production"?"ok":v.stage==="Staging"?"info":"mute") },
-      { label:"Status", render:v => badge(v.status||"-","mute") },
-      { label:"ROC-AUC", num:true, render:v => num(v.roc_auc) },
-      { label:"F1", num:true, render:v => num(v.f1) },
-      { label:"Created", render:v => when(v.created_at) },
-    ], versions, { empty:"No registered versions." }), { flush:true });
-
-    const evalRuns = sect(r.runs, d => card("Evaluation from training runs", table([
-      { label:"Run", render:x => `<span class="mono">${esc(String(x.run_id).replace("train-","").slice(0,12))}</span>` },
-      { label:"Status", render:x => runStatusBadge(x.status) },
-      { label:"Dataset", render:x => `<span class="mono">${esc(x.dataset_version||"latest")}</span>` },
-      { label:"Algorithm", render:x => `<span class="mono">${esc(x.algorithm||"-")}</span>` },
-      { label:"Accuracy", num:true, render:x => num((x.metrics||{}).accuracy) },
-      { label:"F1", num:true, render:x => num((x.metrics||{}).f1) },
-      { label:"ROC-AUC", num:true, render:x => num((x.metrics||{}).roc_auc) },
-      { label:"Model", render:x => has(x.model_version)?`<span class="mono">v${esc(x.model_version)}</span>`:NA },
-    ], (d.runs||[]).filter(x => Object.keys(x.metrics||{}).length),
-       { empty:"No evaluated training runs yet." }), { flush:true }), "training runs");
-
-    return `<div class="grid g2">${serving}${live}</div>` + byVersion + evalRuns;
-  }
-};
+/* The Evaluation page moved. Offline metrics, the gate outcome and the
+   champion/challenger comparison are all properties of a model VERSION, and
+   asking someone to pick one from a dropdown on a page with no other context
+   was the least legible thing in the old console. They now live on
+   #/models/:version under the Evaluation tab, next to the lineage that
+   produced them. Nothing was dropped -- see pages/model.js, mvEvaluation. */
 
 async function pollRun(runId, attempt){
   attempt = attempt || 0;

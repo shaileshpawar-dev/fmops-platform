@@ -1,71 +1,10 @@
-PAGES.models = {
-  title: "Model Registry",
-  intro: "Model registry. Versions, stages, offline evaluation metrics and the approval gate each version was measured against.",
-  async render(){
-    const r = await loadAll({ models:"/api/v1/models", dash:"/api/v1/dashboard" }, 8000);
-    const dash = r.dash.ok ? r.dash.data : {};
-    const m = dash.model || {}, th = m.thresholds || {}, met = m.metrics || {};
-    const versions = m.versions || [];
-
-    const gate = th.enabled ? card("Approval gate", `
-      <p class="dim" style="margin:0 0 10px">A candidate must clear every absolute threshold
-        <b>and</b> beat the incumbent on <span class="mono">${esc(th.comparison_metric)}</span>
-        by at least <span class="mono">${th.min_improvement}</span> before it can be promoted.</p>
-      <div class="grid g4">
-        ${kpi("Min F1", num(th.min_f1,2), gateMet(met.f1, th.min_f1))}
-        ${kpi("Min ROC-AUC", num(th.min_roc_auc,2), gateMet(met.roc_auc, th.min_roc_auc))}
-        ${kpi("Min precision", num(th.min_precision,2), gateMet(met.precision, th.min_precision))}
-        ${kpi("Max latency p95", ms(th.max_inference_latency_ms),
-              gateMet(th.max_inference_latency_ms, met.inference_latency_p95_ms))}
-      </div>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        ${boolBadge(th.require_clean_validation,"clean validation required","validation optional")}
-        ${boolBadge(th.require_manual_approval,"manual approval required","auto-promote allowed", true)}
-      </div>`) : "";
-
-    const detail = m.available ? card("Offline evaluation — serving version", `
-      <div class="grid g4">
-        ${kpi("Accuracy", num(met.accuracy))}${kpi("Precision", num(met.precision))}
-        ${kpi("Recall", num(met.recall))}${kpi("F1", num(met.f1))}
-      </div>
-      <div class="grid g4" style="margin-top:12px">
-        ${kpi("ROC-AUC", num(met.roc_auc))}${kpi("PR-AUC", num(met.pr_auc))}
-        ${kpi("Log loss", num(met.log_loss))}${kpi("Brier", num(met.brier_score))}
-      </div>
-      <div class="grid g3" style="margin-top:12px">
-        ${kpi("Latency p50", ms(met.inference_latency_p50_ms))}
-        ${kpi("Latency p95", ms(met.inference_latency_p95_ms))}
-        ${kpi("Eval samples", int(met.n_samples), `positive rate ${(met.positive_rate*100||0).toFixed(1)}%`)}
-      </div>
-      <div class="note" style="margin-top:14px">These are <b>offline</b> metrics from the held-out
-        evaluation set. Live quality requires ground-truth labels — see Monitoring.</div>`) : "";
-
-    const lifecycle = card("Model lifecycle", `<div class="flow">
-      <span class="step done">Registered</span><span class="arw">→</span>
-      <span class="step done">Evaluated</span><span class="arw">→</span>
-      <span class="step ${m.current_stage?"done":""}">Approved</span><span class="arw">→</span>
-      <span class="step ${m.current_stage==="Production"?"on":""}">Production</span>
-    </div>`);
-
-    const tbl = card("Registered versions", table([
-      { label:"Version", render:v => `<b class="mono">v${esc(v.version)}</b>` },
-      { label:"Stage", render:v => badge(v.stage || "None", v.stage==="Production"?"ok":v.stage==="Staging"?"info":"mute") },
-      { label:"Status", render:v => badge(v.status || "—","mute") },
-      { label:"ROC-AUC", num:true, render:v => num(v.roc_auc) },
-      { label:"F1", num:true, render:v => num(v.f1) },
-      { label:"Created", render:v => when(v.created_at) },
-      { label:"Actions", render:v => v.stage === "Production" ? `<span class="dim">serving</span>` :
-          `<button class="btn" data-act="promote" data-model="${esc(m.model_name)}" data-ver="${esc(v.version)}">Promote</button>` },
-    ], versions, { empty:"No versions registered." }), { flush:true,
-      sub: `${versions.length} version${versions.length===1?"":"s"}` });
-
-    return sect(r.models, () => "", "models") + tbl + detail + gate + lifecycle;
-  }
-};
-function gateMet(actual, threshold){
-  if(!has(actual) || !has(threshold)) return "";
-  return actual >= threshold ? badge("met","ok") : badge("not met","bad");
-}
+/* Deployment and experiment surfaces.
+ *
+ * The model registry that used to live here is now pages/model.js: the version
+ * is the primary object and it earned its own module. What remains is the
+ * experiment tracker view, the Deployment Room, and the Quality Gates policy
+ * page that absorbed the old Champion / Challenger comparison.
+ */
 
 PAGES.experiments = {
   title: "Experiments",
@@ -101,146 +40,299 @@ PAGES.experiments = {
   }
 };
 
+/* Deployment Room -- deployment engineering made visible.
+ *
+ * Traffic routing, health evidence and rollback lineage in one place rather
+ * than a table of deployment ids. Every strategy the backend supports gets its
+ * own traffic rendering, because "how traffic moves" is the thing a rollout
+ * view exists to show.
+ */
+
+/* Traffic lanes. The weights are the backend's, not a guess: deployment.traffic
+   is the routing table the API actually enforces. A shadow version is drawn in
+   outline because it mirrors traffic without serving any of it. */
+function trafficLanes(dep){
+  const traffic = dep.traffic || {};
+  const keys = Object.keys(traffic);
+  const lanes = [];
+  keys.sort((a,b) => (Number(traffic[b])||0) - (Number(traffic[a])||0)).forEach(v => {
+    const pctv = Number(traffic[v]) || 0;
+    const isPrev = String(v) === String(dep.previous_version);
+    lanes.push(`<div class="lane">
+      <span class="vn">v${esc(v)}</span>
+      <div class="track"><div class="fill ${isPrev ? "prev" : ""}" style="width:${pctv}%"></div></div>
+      <span class="pctv">${pctv.toFixed(0)}%</span></div>`);
+  });
+  if(dep.shadow_version != null) lanes.push(`<div class="lane shadow">
+      <span class="vn">v${esc(dep.shadow_version)}</span>
+      <div class="track"><div class="fill" style="width:100%"></div></div>
+      <span class="pctv">mirror</span></div>`);
+  if(!lanes.length) return unavailable("No routing table has been published for this endpoint.");
+  return `<div class="traffic">${lanes.join("")}</div>`;
+}
+
+function strategyNote(strat, dep){
+  const s = String(strat || "").toLowerCase();
+  if(s === "canary") return "Traffic moves in configured steps, and each step must clear its "
+    + "evidence thresholds from the persisted inference log before the next one begins.";
+  if(s === "blue_green") return "One version serves all traffic; the previous version stays "
+    + "registered so a rollback is a routing change rather than a redeploy.";
+  if(s === "shadow") return "The shadow version receives mirrored traffic and its responses are "
+    + "discarded. It never serves a user request.";
+  if(s === "direct") return "Traffic is switched in one step with no intermediate state.";
+  return "No strategy recorded for this deployment.";
+}
+
 PAGES.deployments = {
-  title: "Deployments",
-  intro: "Deployment history and the current routing state, including the strategy in force and its traffic split.",
+  title: "Deployment Room",
+  intro: "What is serving, how traffic is routed, what the endpoint's health checks say, "
+       + "and what a rollback would target.",
+  refresh: 30000,
   async render(){
-    const r = await loadAll({ list:"/api/v1/deployments", dash:"/api/v1/dashboard" }, 6000);
-    const dep = (r.dash.ok ? r.dash.data.deployment : {}) || {};
-    const traffic = dep.traffic || {};
-    const strat = (dep.strategy || "").toLowerCase();
+    const r = await loadAll({
+      list:    "/api/v1/deployments",
+      current: "/api/v1/deployments/current",
+      health:  "/api/v1/deployments/health",
+      dash:    "/api/v1/dashboard",
+    }, 5000);
 
-    let diagram = "";
-    if(strat === "canary" || Object.keys(traffic).length > 1){
-      diagram = Object.entries(traffic).map(([v,p]) =>
-        `<div style="display:grid;grid-template-columns:70px 1fr 56px;gap:10px;align-items:center;margin-bottom:7px">
-          <span class="mono">v${esc(v)}</span>
-          <div class="bar"><i style="width:${Number(p)||0}%"></i></div>
-          <span class="num">${Number(p)||0}%</span></div>`).join("");
-    } else if(strat === "blue_green"){
-      diagram = `<div class="flow" style="gap:14px">
-        <div><div class="dim" style="font-size:11px;margin-bottom:4px">Live (blue)</div>
-          <span class="step on">v${esc(dep.current_version ?? "—")}</span></div>
-        <span class="arw">↔</span>
-        <div><div class="dim" style="font-size:11px;margin-bottom:4px">Standby (green)</div>
-          <span class="step">v${esc(dep.candidate_version ?? dep.previous_version ?? "—")}</span></div></div>`;
-    } else if(strat === "shadow"){
-      diagram = `<div class="flow" style="gap:10px">
-        <span class="step">Production traffic</span><span class="arw">→</span>
-        <span class="step on">champion v${esc(dep.current_version ?? "—")}</span>
-        <span class="arw">⇢</span>
-        <span class="step">shadow v${esc(dep.shadow_version ?? "—")} <span class="dim">(not served)</span></span></div>`;
-    }
+    const cur = r.current.ok ? r.current.data : null;
+    const dep = cur && cur.deployment ? cur.deployment : null;
+    const svc = (r.dash.ok ? r.dash.data.service : {}) || {};
 
-    const current = card("Current routing", `
-      <dl class="kv">
-        <dt>Endpoint</dt><dd class="mono">${esc(dep.endpoint||"—")}</dd>
-        <dt>Provider</dt><dd>${badge(dep.provider||"—","info")}</dd>
-        <dt>Strategy</dt><dd>${dep.strategy?badge(dep.strategy,"info"):NA}</dd>
-        <dt>State</dt><dd>${dep.state?badge(dep.state,"info"):NA}</dd>
-        <dt>Serving</dt><dd>${has(dep.current_version)?`<b class="mono">v${esc(dep.current_version)}</b>`:NA}</dd>
-        <dt>Previous</dt><dd>${has(dep.previous_version)?`<span class="mono">v${esc(dep.previous_version)}</span>`:NA}</dd>
-        <dt>Rolled back</dt><dd>${boolBadge(dep.rolled_back,"yes","no",true)}</dd>
-      </dl>
-      ${diagram?`<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line-2)">${diagram}</div>`:""}`,
-      { right: has(dep.previous_version) ?
-        `<button class="btn danger" data-act="rollback">Roll back</button>` :
-        `<button class="btn" disabled title="No previous version to roll back to">Roll back</button>` });
+    if(!dep) return card("Endpoint",
+      unavailable(cur ? (cur.detail || "No deployment has been created for this endpoint.")
+        : "The deployments API could not be reached."), { flush:true })
+      + card("Deployment history", r.list.ok
+        ? table(DEPLOY_COLS, r.list.data, { empty:"No deployments recorded." })
+        : unavailable("History unavailable."), { flush:true });
 
-    const hist = sect(r.list, list => card("Deployment history", table([
-      { label:"ID", render:x => `<span class="mono">${esc(String(x.id).slice(0,12))}</span>` },
-      { label:"Model", render:x => `<span class="mono">${esc(x.model_name||"—")}</span>` },
-      { label:"Version", render:x => has(x.current_version)?`<b class="mono">v${esc(x.current_version)}</b>`:NA },
-      { label:"Strategy", render:x => badge(x.strategy||"—","info") },
-      { label:"State", render:x => badge(x.state||"—", x.state==="live"||x.state==="succeeded"?"ok":
-          x.state==="rolled_back"?"bad":"mute") },
-      { label:"Endpoint", render:x => `<span class="mono dim">${esc(x.endpoint_name||"—")}</span>` },
-      { label:"Started", render:x => when(x.created_at) },
-    ], list, { empty:"No deployments recorded." }), { flush:true, sub:`${list.length} record(s)` }), "deployments");
+    /* -- header ------------------------------------------------------- */
+    const head = `<div class="mhead">
+      <div class="top">
+        <div style="min-width:0">
+          <h1>${esc(dep.endpoint_name || "endpoint")}</h1>
+          <div style="display:flex;gap:9px;align-items:center;margin-top:8px;flex-wrap:wrap">
+            ${badge(dep.state || "unknown", dep.state === "live" ? "ok" : "info", dep.state === "live")}
+            ${badge(dep.strategy || "no strategy", "mute")}
+            ${badge((dep.provider || "provider") + " provider", "mute")}
+          </div>
+          <div class="idl">
+            <span>serving <b>v${esc(String(dep.current_version ?? "—"))}</b></span>
+            <span>previous <b>${dep.previous_version != null
+              ? "v" + esc(String(dep.previous_version)) : "none"}</b></span>
+            <span>model <b>${esc(dep.model_name || "-")}</b></span>
+            <span>updated <b>${esc(String(dep.updated_at || dep.created_at || "")
+              .slice(0,19).replace("T"," "))}</b></span>
+          </div>
+        </div>
+        <span class="spacer"></span>
+        ${dep.current_version != null
+          ? `<a class="btn" href="#/models/${esc(String(dep.current_version))}">Open v${esc(String(dep.current_version))}</a>` : ""}
+      </div>
+    </div>`;
 
-    return current + hist + `<div class="note"><b>Local provider.</b> Routing is enforced
-      in-process by the API: a canary split genuinely routes that share of predictions. It does not
-      provision infrastructure — that is the SageMaker provider, which is not deployed here.</div>`;
+    /* -- traffic ------------------------------------------------------ */
+    const traffic = card("Traffic", trafficLanes(dep)
+      + `<p class="dim" style="margin:13px 0 0;font-size:12.5px">${esc(strategyNote(dep.strategy, dep))}</p>`,
+      { sub:`${esc(dep.strategy || "—")}` });
+
+    /* -- health evidence ---------------------------------------------- */
+    const h = r.health.ok ? r.health.data : null;
+    const health = card("Health evidence", h ? `
+      <div class="checks">${Object.entries(h.checks || {}).map(([k,v]) =>
+        `<span class="c ${v ? "" : "no"}">${v ? "✓" : "✕"} ${esc(k)}</span>`).join("")
+        || `<span class="dim">No named checks reported.</span>`}</div>
+      <div class="grid g4" style="margin-top:15px">
+        ${kpi("Status", badge(h.status || "unknown",
+          h.status === "healthy" ? "ok" : h.status === "degraded" ? "warn" : "bad"))}
+        ${kpi("p95 latency", ms(h.latency_p95_ms))}
+        ${kpi("Error rate", pct(h.error_rate, 2))}
+        ${kpi("Requests", int(h.request_count), "in the health window")}
+      </div>
+      ${h.detail ? `<p class="dim" style="margin:12px 0 0;font-size:12.5px">${esc(h.detail)}</p>` : ""}`
+      : unavailable("The endpoint health API could not be reached."),
+      { sub: h ? `checked ${String(h.checked_at||"").slice(11,19)}` : "" });
+
+    /* -- timeline ----------------------------------------------------- */
+    const events = dep.events || [];
+    const timeline = card("Deployment timeline", events.length
+      ? `<div class="tl">${events.map(e => {
+          const bad = /fail|error|rollback/i.test(String(e.event || ""));
+          return `<div class="ev ${bad ? "bad" : "done"}"><span class="pip"></span>
+            <div><div class="when">${when(e.created_at)}</div>
+              <div class="what">${esc(String(e.event || "").replace(/_/g," "))}</div>
+              <div class="det">${esc(JSON.stringify(e.detail || {}).slice(0,200))}</div>
+            </div></div>`;
+        }).join("")}</div>`
+      : emptyState("This deployment recorded no events."),
+      { sub:`${events.length} event(s)` });
+
+    /* -- rollback ------------------------------------------------------ */
+    /* The API resolves a target: explicit version, else the recorded previous,
+       else the most recently archived production version. Naming which applies
+       beats failing after the click. */
+    const target = dep.previous_version;
+    const rollback = card("Rollback", target != null ? `
+      <div class="grid g3">
+        ${kpi("Would restore", `<span class="mono">v${int(target)}</span>`, "recorded previous version")}
+        ${kpi("From", `<span class="mono">v${int(dep.current_version)}</span>`, "currently serving")}
+        ${kpi("Already rolled back", boolBadge(dep.rolled_back, "yes", "no", true))}
+      </div>
+      <div style="margin-top:14px">
+        <button class="btn danger" data-act="rollback">Roll back to v${int(target)}</button></div>`
+      : `<div class="note warn"><b>No rollback target.</b><br>
+        <span style="font-size:12.5px">This endpoint has no recorded previous version. The API
+        would fall back to the most recently archived production version, and fail if none
+        exists — so the control stays disabled rather than failing after the click.</span></div>
+      <div style="margin-top:12px"><button class="btn" disabled>Roll back</button></div>`,
+      { sub:"POST /api/v1/deployments/rollback" });
+
+    /* -- history ------------------------------------------------------- */
+    const hist = sect(r.list, list => card("All deployments",
+      table(DEPLOY_COLS, list, { empty:"No deployments recorded.",
+        rowClass:x => x.state === "live" ? "win" : "" }),
+      { flush:true, sub:`${list.length} record(s)` }), "deployments");
+
+    const provider = `<div class="note"><b>Provider is
+      <span class="mono">${esc(dep.provider || "local")}</span>.</b>
+      <span style="font-size:12.5px">Routing is enforced in-process by the API: a canary split
+      genuinely routes that share of predictions. It does not provision infrastructure — that is
+      the SageMaker provider, which is not what runs here.
+      ${svc.aws_enabled ? "" : "AWS integration is disabled on this deployment."}</span></div>`;
+
+    return head
+      + sect2("01", "Routing", "what is serving and how")
+      + `<div class="grid g2">${traffic}${health}</div>`
+      + sect2("02", "History", "events and rollback")
+      + `<div class="grid g2">${timeline}${rollback}</div>`
+      + hist + provider;
   }
 };
 
-PAGES.champion = {
-  title: "Champion / Challenger",
-  intro: "Every candidate is compared against the incumbent. It is promoted only if it clears the absolute gate and beats the champion by the configured margin.",
+const DEPLOY_COLS = [
+  { label:"ID", render:x => `<span class="mono">${esc(String(x.id).slice(0,14))}</span>` },
+  { label:"Version", render:x => x.current_version != null
+      ? `<a class="mono" href="#/models/${esc(String(x.current_version))}"><b>v${esc(String(x.current_version))}</b></a>` : NA },
+  { label:"Strategy", render:x => badge(x.strategy || "—","mute") },
+  { label:"State", render:x => badge(x.state || "—",
+      x.state === "live" || x.state === "succeeded" ? "ok"
+      : x.state === "rolled_back" ? "bad" : "mute") },
+  { label:"Previous", render:x => x.previous_version != null
+      ? `<span class="mono dim">v${esc(String(x.previous_version))}</span>` : NA },
+  { label:"Endpoint", render:x => `<span class="mono dim">${esc(x.endpoint_name || "—")}</span>` },
+  { label:"Started", render:x => when(x.created_at) },
+];
+
+/* ==========================================================================
+ * Quality Gates
+ *
+ * There is no gate-collection endpoint in this backend. What exists is the
+ * configured policy (/api/v1/config -> approval) and on-demand evaluation of
+ * one version. The page is therefore the policy, plus the champion/challenger
+ * comparison that decides a promotion -- it cannot show a history of gate
+ * decisions, and says so rather than implying one.
+ * ========================================================================== */
+PAGES.gates = {
+  title: "Quality Gates",
+  intro: "The policy a model must clear before it reaches production, and the "
+       + "champion/challenger comparison that decides a promotion.",
   async render(){
-    const d = await api.get("/api/v1/dashboard", 8000);
-    const m = d.model || {}, th = m.thresholds || {};
-    const vs = (m.versions || []).slice().sort((a,b) => Number(b.version) - Number(a.version));
-    const champ = vs.find(v => v.stage === "Production") || vs[vs.length-1];
-    const chall = vs.find(v => v !== champ && v.stage !== "Production");
+    const r = await loadAll({ cfg:"/api/v1/config", dash:"/api/v1/dashboard" }, 15000);
+    if(!r.cfg.ok) return errorState(r.cfg.error, "gates");
+    const ap = r.cfg.data.approval || {};
+    const model = (r.dash.ok ? r.dash.data.model : {}) || {};
+    const met = model.metrics || {};
+    const versions = model.versions || [];
 
-    const metric = th.comparison_metric || "roc_auc";
-    const minImp = has(th.min_improvement) ? th.min_improvement : null;
+    /* A configured minimum of 0 is not a requirement -- every possible value
+       clears it. Rendering it as a passed check would invent a gate and pad
+       the evidence table with meaningless green rows, so it is shown as
+       "not gated" instead. */
+    const gated = t => typeof ap[t] === "number" && ap[t] > 0;
+    const absolute = [
+      ["f1", "min_f1", "F1"],
+      ["roc_auc", "min_roc_auc", "ROC-AUC"],
+      ["precision", "min_precision", "Precision"],
+      ["recall", "min_recall", "Recall"],
+    ].filter(([, t]) => ap[t] != null);
 
-    if(!champ) return unavailable("No registered versions to compare.");
+    const policy = card("Production policy", `
+      <div class="scroll"><table class="evid">
+        <thead><tr><th>Requirement</th><th class="num">Threshold</th>
+          <th class="num">Production v${esc(String(model.current_version ?? "—"))}</th>
+          <th>Verdict</th></tr></thead>
+        <tbody>${absolute.map(([m, t, label]) => {
+          const val = met[m];
+          const on = gated(t);
+          const pass = typeof val === "number" && val >= ap[t];
+          return `<tr class="${on && typeof val === "number" && !pass ? "failed" : ""}">
+            <td>${esc(label)}</td>
+            <td class="req">${on ? num(ap[t], 4)
+              : `<span class="dim">no minimum</span>`}</td>
+            <td class="obs">${num(val, 4)}</td>
+            <td>${!on ? badge("not gated","mute")
+              : typeof val !== "number" ? badge("no data","mute")
+              : pass ? badge("pass","ok") : badge("fail","bad")}</td></tr>`;
+        }).join("")}
+        ${ap.max_inference_latency_ms != null ? `<tr>
+          <td>Inference latency p95</td>
+          <td class="req">&le; ${num(ap.max_inference_latency_ms, 1)} ms</td>
+          <td class="obs">${num(met.inference_latency_p95_ms, 2)}</td>
+          <td>${typeof met.inference_latency_p95_ms !== "number" ? badge("no data","mute")
+            : met.inference_latency_p95_ms <= ap.max_inference_latency_ms
+              ? badge("pass","ok") : badge("fail","bad")}</td></tr>` : ""}
+        </tbody></table></div>
+      <div class="grid g4" style="margin-top:15px">
+        ${kpi("Gate enabled", boolBadge(ap.enabled, "yes", "no"))}
+        ${kpi("Clean validation", boolBadge(ap.require_clean_validation, "required", "optional"))}
+        ${kpi("Manual approval", boolBadge(ap.require_manual_approval, "required", "not required"),
+          ap.require_manual_approval ? "a human must promote" : "")}
+        ${kpi("Comparison metric", `<span class="mono">${esc(ap.comparison_metric || "-")}</span>`,
+          ap.min_improvement != null ? `min improvement ${ap.min_improvement}` : "")}
+      </div>`, { sub:"from platform configuration" });
 
-    if(!chall) return card("Comparison", `<div class="state">
-      <div class="big">No challenger registered</div>
-      Only one version exists (<span class="mono">v${esc(champ.version)}</span>, ${esc(champ.stage||"—")}).
-      A challenger appears here after the training or retraining pipeline registers a new candidate.</div>`)
-      + gateExplainer(th, metric, minImp)
-      + card("Champion", versionPanel(champ, "CHAMPION"));
+    const improve = card("Beating the incumbent", `
+      <p style="margin:0 0 12px;font-size:13px;line-height:1.6">Clearing the absolute thresholds
+        is necessary but not sufficient. A candidate must also improve
+        <span class="mono">${esc(ap.comparison_metric || "the comparison metric")}</span> over the
+        current production version by at least
+        <span class="mono">${esc(String(ap.min_improvement ?? "—"))}</span>.</p>
+      <p class="dim" style="margin:0;font-size:12.5px">A margin of zero would let run-to-run noise
+        churn the production model, which is why it is not zero. Thresholds are read from
+        configuration and are never relaxed to make a candidate pass.</p>`,
+      { sub:"champion / challenger" });
 
-    const delta = (a,b) => (has(a) && has(b)) ? a - b : null;
-    const rows = [["ROC-AUC","roc_auc"],["F1","f1"]].map(([label,key]) => {
-      const c = champ[key], k = chall[key], dl = delta(k,c);
-      return { label, c, k, dl, decisive: key === metric };
-    });
+    const ladder = card("Versions against the policy", versions.length ? table([
+      { label:"Version", render:v => `<a class="mono" href="#/models/${v.version}"><b>v${int(v.version)}</b></a>` },
+      { label:"Stage", render:v => badge(v.stage || "-", v.stage === "Production" ? "ok"
+          : v.stage === "Staging" ? "info" : "mute") },
+      ...absolute.filter(([, t]) => gated(t)).map(([m, t, label]) => ({
+        label, num:true, render:v => {
+          const val = (v.metrics || {})[m];
+          if(typeof val !== "number") return NA;
+          const pass = val >= ap[t];
+          return `<span class="mono" style="color:var(--${pass ? "ok" : "bad"})">${val.toFixed(4)}</span>`;
+        }
+      })),
+      { label:"Meets policy", render:v => {
+          const vals = absolute.filter(([, t]) => gated(t))
+            .map(([m, t]) => [(v.metrics||{})[m], ap[t]]);
+          if(!vals.length) return badge("no thresholds","mute");
+          if(vals.some(([a]) => typeof a !== "number")) return badge("no data","mute");
+          return vals.every(([a,b]) => a >= b) ? badge("yes","ok") : badge("no","bad");
+        } },
+    ], versions.slice().sort((a,b) => b.version - a.version), { empty:"No versions." })
+      : unavailable("The registry reported no versions."),
+      { flush:true, sub:"absolute thresholds only" });
 
-    const dMetric = delta(chall[metric], champ[metric]);
-    let verdict;
-    if(dMetric === null) verdict = badge("Not comparable — metric missing on one side","mute");
-    else if(minImp !== null && dMetric >= minImp)
-      verdict = badge(`PASS — challenger exceeds champion by ${dMetric.toFixed(4)} (≥ ${minImp})`,"ok",true);
-    else verdict = badge(`REJECTED — improvement ${dMetric.toFixed(4)} is below the required ${minImp}`,"bad",true);
-
-    const compare = card("Head to head", `
-      <div class="grid g2" style="margin-bottom:14px">
-        ${versionPanel(champ,"CHAMPION")}${versionPanel(chall,"CHALLENGER")}</div>
-      <div class="scroll"><table><thead><tr>
-        <th>Metric</th><th class="num">Champion v${esc(champ.version)}</th>
-        <th class="num">Challenger v${esc(chall.version)}</th><th class="num">Difference</th><th></th>
-      </tr></thead><tbody>${rows.map(r => `<tr>
-        <td>${esc(r.label)}${r.decisive?" "+badge("decisive","info"):""}</td>
-        <td class="num">${num(r.c)}</td><td class="num">${num(r.k)}</td>
-        <td class="num">${r.dl===null?NA:`<span class="mono" style="color:${r.dl>=0?"var(--ok)":"var(--bad)"}">
-          ${r.dl>=0?"+":""}${r.dl.toFixed(4)}</span>`}</td>
-        <td>${r.dl===null?"":(r.dl>=0?badge("better","ok"):badge("worse","bad"))}</td></tr>`).join("")}
-      </tbody></table></div>
-      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line-2)">
-        <div class="dim" style="font-size:11px;font-weight:700;letter-spacing:.06em;
-          text-transform:uppercase;margin-bottom:7px">Gate decision</div>${verdict}</div>`);
-
-    return compare + gateExplainer(th, metric, minImp);
+    return policy + `<div class="grid g2">${improve}${card("What this page cannot show", `
+      <p style="margin:0 0 11px;font-size:13px;line-height:1.6">There is no gate-decision history
+        in this platform. Gate outcomes are recorded on the run and on the model version that
+        produced them, not as a separate collection.</p>
+      <p class="dim" style="margin:0;font-size:12.5px">To see a specific decision — the checks, the
+        observed values and the comparison — open a version and use its
+        <b>Evaluation</b> tab, which re-runs the gate against the thresholds in force now.</p>`,
+      { sub:"an honest gap" })}</div>` + ladder;
   }
 };
-function versionPanel(v, role){
-  return `<div class="kpi"><div class="k">${role}</div>
-    <div class="v">v${esc(v.version)}</div>
-    <div class="m">${badge(v.stage||"None", v.stage==="Production"?"ok":"mute")}
-      &nbsp;<span class="dim">${esc(v.status||"")}</span></div>
-    <div class="grid g2" style="margin-top:10px;gap:8px">
-      <div><div class="dim" style="font-size:10.5px">ROC-AUC</div>${num(v.roc_auc)}</div>
-      <div><div class="dim" style="font-size:10.5px">F1</div>${num(v.f1)}</div></div></div>`;
-}
-function gateExplainer(th, metric, minImp){
-  return card("How the gate decides", `<p style="margin:0 0 10px;color:var(--ink-2)">
-    Promotion requires <b>both</b> conditions. Clearing the absolute thresholds is not enough:
-    a candidate that is merely as good as the incumbent is rejected, which is what stops run-to-run
-    noise from churning the production model.</p>
-    <div class="flow" style="margin-bottom:12px">
-      <span class="step">Absolute thresholds</span><span class="arw">AND</span>
-      <span class="step">Beats champion on <span class="mono">${esc(metric)}</span>
-        by ≥ <span class="mono">${minImp === null ? "—" : minImp}</span></span>
-      <span class="arw">→</span><span class="step done">Promote</span></div>
-    <dl class="kv">
-      <dt>Comparison metric</dt><dd class="mono">${esc(metric)}</dd>
-      <dt>Minimum improvement</dt><dd class="mono">${minImp === null ? "—" : minImp}</dd>
-      <dt>Manual approval</dt><dd>${boolBadge(th.require_manual_approval,"required","not required",true)}</dd>
-    </dl>`);
-}

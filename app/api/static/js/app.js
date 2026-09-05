@@ -4,42 +4,67 @@
    and Settings are deliberately absent: the backend exposes no distinct data
    for them, and the information they would show already lives in Deployments,
    Monitoring and System Health. */
+/* Navigation is organised around what an operator is doing, not around which
+   backend module answers. Every entry resolves to a page backed by a real API.
+
+   Three scope notes, because the labels could otherwise overclaim:
+     - Incidents is the alerts API. There is no incident lifecycle in this
+       backend -- raise and acknowledge, nothing else -- so the page is written
+       as an attention queue.
+     - Quality Gates has no collection endpoint. It shows the configured policy
+       and evaluates any version against it on demand.
+     - Runtime reads the process, not the cloud. It is deliberately not called
+       Infrastructure: there is no AWS introspection here. */
 const NAV = [
-  { group:"Overview", items:[
-      ["overview","Command Center","▤"],
-      ["newproject","New ML Project","✦"] ] },
-  { group:"Model lifecycle", items:[
-      ["datasets","Datasets","▦"], ["automl","AutoML","✦"],
-      ["training","Training","⚙"], ["evaluation","Evaluation","◎"],
-      ["models","Model Registry","▫"] ] },
-  { group:"Deployment", items:[ ["deployments","Deployments","⇪"] ] },
-  { group:"Observability", items:[
-      ["monitoring","Monitoring","◴"], ["drift","Drift Detection","∿"],
-      ["retraining","Retraining","⟳"], ["experiments","Experiments","⌗"] ] },
-  { group:"Governance", items:[
-      ["champion","Champion / Challenger","⚖"], ["audit","Audit Log","☰"] ] },
+  { group:"Control", items:[
+      ["overview","Command Center","▤"], ["models","Models","▫"],
+      ["deployments","Deployments","⇪"], ["incidents","Incidents","⚠"] ] },
+  { group:"Build", items:[
+      ["datasets","Datasets","▦"], ["training","Training","⚙"],
+      ["automl","AutoML","✦"], ["experiments","Experiments","⌷"] ] },
+  { group:"Operate", items:[
+      ["monitoring","Observability","◴"], ["drift","Drift","∿"],
+      ["retraining","Retraining","⟳"] ] },
+  { group:"Govern", items:[
+      ["gates","Quality Gates","⚖"], ["audit","Audit","☰"],
+      ["runtime","Runtime","♡"] ] },
   { group:"LLMOps", items:[
       ["llm-overview","Overview","◇"], ["llm-prompts","Prompts","¶"],
       ["llm-evals","Evaluations","✓"], ["llm-cost","Tokens & Cost","$"],
       ["llm-safety","Safety","⛨"] ] },
-  { group:"System", items:[ ["system","System Health","♥"], ["__docs","API Docs","↗"] ] },
+  { group:"", items:[ ["__docs","API Docs","↗"] ] },
 ];
+
+/* Counts shown in the rail come from the dashboard payload the shell already
+   fetches for the header. No navigation chrome adds a request. */
+let NAV_COUNTS = {};
 
 function buildNav(){
   const cur = route();
-  $("#nav").innerHTML = NAV.map(sec =>
+  const cta = `<div class="navcta">
+    <a class="btn pri" href="#/newproject">+ New ML Project</a></div>`;
+  $("#nav").innerHTML = cta + NAV.map(sec =>
     (sec.group ? `<div class="navgrp">${esc(sec.group)}</div>` : "") +
-    sec.items.map(([id,label,icon]) => id === "__docs"
-      ? `<a class="navlink" href="/docs" target="_blank" rel="noopener">
-           <span class="ico">${icon}</span>${esc(label)}</a>`
-      : `<a class="navlink ${id===cur?"on":""}" href="#/${id}">
-           <span class="ico">${icon}</span>${esc(label)}</a>`).join("")
+    sec.items.map(([id,label,icon]) => {
+      if(id === "__docs") return `<a class="navlink" href="/docs" target="_blank" rel="noopener">
+        <span class="ico">${icon}</span>${esc(label)}</a>`;
+      const c = NAV_COUNTS[id];
+      const cnt = (c && c.n) ? `<span class="cnt ${c.alert?"alert":""}">${esc(String(c.n))}</span>` : "";
+      return `<a class="navlink ${id===cur?"on":""}" href="#/${id}">
+        <span class="ico">${icon}</span>${esc(label)}${cnt}</a>`;
+    }).join("")
   ).join("");
 }
-function route(){
-  const r = (location.hash || "#/overview").replace(/^#\//,"").split("?")[0];
-  return PAGES[r] ? r : "overview";
+
+/* Routes are `#/page` or `#/page/param`. The param exists so a model version
+   can be addressable -- #/models/3 -- without a router rewrite. */
+function routeParts(){
+  const raw = (location.hash || "#/overview").replace(/^#\//,"").split("?")[0];
+  const seg = raw.split("/").filter(Boolean);
+  return { id: seg[0] || "overview", param: seg[1] ? decodeURIComponent(seg[1]) : null };
 }
+function route(){ const p = routeParts(); return PAGES[p.id] ? p.id : "overview"; }
+function routeParam(){ return routeParts().param; }
 
 let refreshTimer = null;
 async function render(){
@@ -301,9 +326,21 @@ async function header(){
     $("#envbadge").innerHTML = badge(String(svc.environment||"unknown").toUpperCase(), "info");
     const ok = sys.latency_slo_met !== false && sys.error_slo_met !== false;
     $("#healthbadge").innerHTML = badge(ok ? "Healthy" : "Degraded", ok ? "ok" : "warn", true);
+
+    /* Rail counts, from the payload just fetched. Only counts the backend
+       actually reports -- an absent section leaves its entry unnumbered
+       rather than showing a zero it did not confirm. */
+    const model = d.model || {}, alerts = d.alerts || {};
+    const next = {};
+    if(model.available && model.total_versions != null)
+      next.models = { n: model.total_versions };
+    if(alerts.available && alerts.open_count)
+      next.incidents = { n: alerts.open_count, alert: true };
+    if(JSON.stringify(next) !== JSON.stringify(NAV_COUNTS)){ NAV_COUNTS = next; buildNav(); }
   } catch(e){
     $("#envbadge").innerHTML = "";
     $("#healthbadge").innerHTML = badge("API unreachable","bad",true);
+    if(Object.keys(NAV_COUNTS).length){ NAV_COUNTS = {}; buildNav(); }
   }
 }
 

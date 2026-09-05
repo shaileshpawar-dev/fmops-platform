@@ -1203,7 +1203,7 @@ async function stepMonitor(){
         <a class="btn" href="#/monitoring">Monitoring</a>
         <a class="btn" href="#/drift">Drift Detection</a>
         <a class="btn" href="#/retraining">Retraining</a>
-        <a class="btn" href="#/champion">Champion / Challenger</a>
+        <a class="btn" href="#/gates">Quality Gates</a>
         <a class="btn" href="#/audit">Audit Log</a>
         <a class="btn" href="#/overview">Command Center</a>
       </div>
