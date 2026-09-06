@@ -15,16 +15,36 @@ PAGES.audit = {
     return filter + `<div id="audittbl">${auditTable(entries)}</div>`;
   }
 };
+/* The Resource and Status columns read `e.resource` and `e.status`, which this
+   API has never returned -- both rendered empty on every row since the page was
+   written. The audit payload carries resource_type/resource_id and `outcome`. */
 function auditTable(rows){
   return card("Audit trail", table([
-    { label:"Timestamp", render:e => when(e.created_at || e.timestamp) },
-    { label:"Actor", render:e => `<span class="mono">${esc(e.actor||"system")}</span>` },
-    { label:"Action", render:e => badge(e.action||"—","info") },
-    { label:"Resource", render:e => `<span class="mono">${esc(e.resource||"—")}</span>` },
-    { label:"Status", render:e => e.status ?
-        badge(e.status, /ok|success|200/i.test(String(e.status))?"ok":"bad") : NA },
-    { label:"Detail", render:e => `<span class="dim">${esc(String(e.detail||e.details||"").slice(0,140))}</span>` },
-  ], rows, { empty:"No audit entries recorded." }), { flush:true });
+    { label:"Timestamp", sort:e => e.created_at, render:e => when(e.created_at) },
+    { label:"Actor", sort:e => e.actor,
+      render:e => `<span class="mono">${esc(e.actor || "system")}</span>` },
+    { label:"Action", sort:e => e.action,
+      render:e => `<span class="mono">${esc(String(e.action || "—"))}</span>` },
+    { label:"Resource", sort:e => e.resource_type, render:e => {
+        if(!e.resource_type && !e.resource_id) return NA;
+        const id = String(e.resource_id || "");
+        return `<span class="dim">${esc(e.resource_type || "")}</span>
+          ${id ? " " + copyable(id, id.length > 22 ? id.slice(0,22) + "…" : id,
+                                { label:"resource id" }) : ""}`;
+      } },
+    { label:"Outcome", sort:e => e.outcome, render:e => e.outcome
+        ? badge(e.outcome, /success|ok/i.test(String(e.outcome)) ? "ok" : "bad") : NA },
+    { label:"Detail", render:e => {
+        const d = e.detail;
+        if(d == null || d === "") return NA;
+        const t = typeof d === "string" ? d : JSON.stringify(d);
+        return `<span class="dim" title="${esc(t)}">${esc(t.slice(0,120))}${
+          t.length > 120 ? "…" : ""}</span>`;
+      } },
+  /* No in-table filter here: the page already has a text search and an action
+     dropdown above it, and two search boxes on one screen is worse than one. */
+  ], rows, { id:"audit", sortKey:"Timestamp", sortDir:"desc",
+             empty:"No audit entries recorded." }), { flush:true });
 }
 
 /* Runtime -- deliberately not called Infrastructure.

@@ -28,7 +28,7 @@ PAGES.automl = {
 
     const runs = sect(r.runs, d => card("AutoML runs", table([
       { label:"Run", render:x => `<span class="mono">${esc(String(x.run_id).replace("automl-","").slice(0,12))}</span>` },
-      { label:"Status", render:x => automlStatusBadge(x.status) },
+      { label:"Status", render:x => runStatusBadge(x.status) },
       { label:"Dataset", render:x => `<span class="mono">${esc(x.dataset_version)}</span>` },
       { label:"Target", render:x => `<span class="mono">${esc(x.target_column)}</span>` },
       { label:"Candidates", num:true, render:x => int((x.algorithms||[]).length) },
@@ -46,12 +46,8 @@ PAGES.automl = {
   }
 };
 
-function automlStatusBadge(s){
-  const map = { completed:"ok", completed_with_warnings:"warn", failed:"bad",
-                training:"info", profiling:"info", ranking:"info", queued:"mute" };
-  const label = s === "completed_with_warnings" ? "completed with warnings" : (s || "unknown");
-  return badge(label, map[s] || "mute", ["training","profiling","ranking","queued"].includes(s));
-}
+/* Run status now comes from core.js runStatusBadge: one state->colour map
+   for every page, so a rejected run is the same colour wherever it appears. */
 
 function renderWizard(d){
   const prof = d.profile, target = prof.suggested_target;
@@ -183,7 +179,7 @@ function renderAutoMLRun(run){
   const best = lb[0];
 
   const head = `<div class="grid g4" style="margin-bottom:14px">
-    ${kpi("Status", automlStatusBadge(run.status),
+    ${kpi("Status", runStatusBadge(run.status),
           has(run.duration_seconds)?`${Number(run.duration_seconds).toFixed(1)}s`:"")}
     ${kpi("Candidates", int(cands.length), `${lb.length} succeeded · ${failed.length} failed`)}
     ${kpi("Primary metric", `<span class="mono">${esc(run.primary_metric)}</span>`)}
@@ -352,7 +348,7 @@ async function pollAutoML(runId, attempt){
   const box = $("#amresult");
   if(box) box.innerHTML = `
     <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-      <b class="mono">${esc(runId.replace("automl-",""))}</b> ${automlStatusBadge(run.status)}
+      <b class="mono">${esc(runId.replace("automl-",""))}</b> ${runStatusBadge(run.status)}
       <span class="spacer"></span><span class="mono dim">${pct}%</span>
     </div>
     <div class="bar" style="margin-bottom:10px"><i style="width:${pct}%"></i></div>

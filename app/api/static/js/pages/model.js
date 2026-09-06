@@ -82,16 +82,22 @@ async function modelsIndex(){
     { sub:`${history.length} transition(s) recorded` });
 
   const tbl = card("All versions", table([
-    { label:"Version", render:v => `<a class="mono" href="#/models/${v.version}"><b>v${int(v.version)}</b></a>` },
-    { label:"Stage", render:v => stageBadge(v) },
-    { label:"Algorithm", render:v => `<span class="mono">${esc(v.algorithm || "-")}</span>` },
-    { label:"ROC-AUC", num:true, render:v => num((v.metrics||{}).roc_auc, 4) },
-    { label:"F1", num:true, render:v => num((v.metrics||{}).f1, 4) },
-    { label:"Dataset", render:v => v.dataset_version
+    { label:"Version", sort:v => v.version,
+      render:v => `<a class="mono" href="#/models/${v.version}"><b>v${int(v.version)}</b></a>` },
+    { label:"Stage", sort:v => v.stage, render:v => stageBadge(v) },
+    { label:"Algorithm", sort:v => v.algorithm,
+      render:v => `<span class="mono">${esc(v.algorithm || "-")}</span>` },
+    { label:"ROC-AUC", num:true, sort:v => (v.metrics||{}).roc_auc,
+      render:v => num((v.metrics||{}).roc_auc, 4) },
+    { label:"F1", num:true, sort:v => (v.metrics||{}).f1,
+      render:v => num((v.metrics||{}).f1, 4) },
+    { label:"Dataset", sort:v => v.dataset_version, render:v => v.dataset_version
         ? `<span class="mono dim">${esc(v.dataset_version)}</span>` : NA },
-    { label:"Registered", render:v => when(v.created_at) },
-  ], versions.slice().sort((a,b) => b.version - a.version),
-    { empty:"No versions registered.", rowClass:v => v.stage === "Production" ? "win" : "" }),
+    { label:"Registered", sort:v => v.created_at, render:v => when(v.created_at) },
+  ], versions, {
+    id:"models-all", sortKey:"Version", sortDir:"desc",
+    filter:"Filter by version, stage, algorithm or dataset",
+    empty:"No versions registered.", rowClass:v => v.stage === "Production" ? "win" : "" }),
     { flush:true, sub:`${versions.length} total` });
 
   return head + rail + promo + tbl;
@@ -168,16 +174,19 @@ async function modelDetail(version){
 async function mvOverview(name, v, history){
   const met = v.metrics || {};
   const lineage = card("Lineage", `<div class="kv">
-      <div><dt>Dataset version</dt><dd><span class="mono">${esc(v.dataset_version || "-")}</span>
+      <div><dt>Dataset version</dt><dd>${copyable(v.dataset_version, null, { label:"dataset version" })}
         ${v.dataset_version ? `<a href="#/datasets" style="margin-left:8px">Datasets</a>` : ""}</dd></div>
-      <div><dt>Dataset hash</dt><dd><span class="mono dim">${
-        esc(String(v.dataset_hash || "-").slice(0,32))}</span></dd></div>
-      <div><dt>Training run</dt><dd><span class="mono">${esc(v.run_id || "-")}</span>
+      <div><dt>Dataset hash</dt><dd>${copyable(v.dataset_hash,
+        String(v.dataset_hash || "").slice(0,24) + (String(v.dataset_hash||"").length > 24 ? "…" : ""),
+        { label:"dataset hash" })}</dd></div>
+      <div><dt>Training run</dt><dd>${copyable(v.run_id, null, { label:"run id" })}
         <a href="#/experiments" style="margin-left:8px">Experiments</a></dd></div>
       <div><dt>Algorithm</dt><dd><span class="mono">${esc(v.algorithm || "-")}</span></dd></div>
-      <div><dt>Git commit</dt><dd><span class="mono">${esc(v.git_commit || "-")}</span></dd></div>
+      <div><dt>Git commit</dt><dd>${copyable(v.git_commit, null, { label:"git commit" })}</dd></div>
       <div><dt>Registered by</dt><dd>${esc(v.created_by || "-")}</dd></div>
-      <div><dt>Artifact</dt><dd><span class="mono dim">${esc(v.artifact_uri || "-")}</span></dd></div>
+      <div><dt>Artifact</dt><dd>${copyable(v.artifact_uri,
+        String(v.artifact_uri || "").slice(0,44) + (String(v.artifact_uri||"").length > 44 ? "…" : ""),
+        { label:"artifact URI" })}</dd></div>
     </div>`, { sub:"dataset → run → model" });
 
   const tl = history.length ? `<div class="tl">${history.slice().reverse().map(h => `

@@ -87,8 +87,12 @@ nav{padding:8px var(--s2) var(--s5);flex:1}
 .navlink.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
 .navlink.on::before{content:"";position:absolute;left:-8px;top:5px;bottom:5px;width:2.5px;
   border-radius:0 2px 2px 0;background:var(--accent)}
-.ico{width:15px;text-align:center;opacity:.7;font-size:12px;flex:none}
+.ico{width:16px;height:16px;display:grid;place-items:center;opacity:.72;flex:none}
 .navlink.on .ico{opacity:1}
+/* One stroke weight everywhere, inheriting colour from the control it sits in,
+   so an icon never disagrees with its label. */
+.ic{display:block;flex:none;vertical-align:-.125em}
+.btn .ic{margin-right:-1px}
 /* Nav counts are read from data the shell already fetches; never a new call. */
 .navlink .cnt{margin-left:auto;font:500 10px/1 var(--mono);color:var(--ink-4);
   background:var(--mute-bg);border:1px solid var(--mute-line);border-radius:3px;padding:2px 5px}
@@ -540,6 +544,98 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px soli
 .banner .sub{color:var(--ink-2);margin-left:auto;text-align:right}
 .banner.warn{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn)}
 
+/* Bar-list labels: full name where it fits, ellipsis with a title beyond a
+   cap, so a long feature name is never silently truncated. */
+.blabel{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:768px){ .blabel{max-width:130px} }
+
+/* ---- metrics window selector --------------------------------------------- */
+.rangebar{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:var(--s4)}
+.rl{font:500 9.5px/1 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--ink-4)}
+.rseg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden;
+  background:var(--panel)}
+.rb{padding:5px 11px;border:0;border-right:1px solid var(--line);background:none;cursor:pointer;
+  font:500 11.5px/1.4 var(--mono);color:var(--ink-3)}
+.rb:last-child{border-right:0}
+.rb:hover{background:var(--panel-2);color:var(--ink)}
+.rb.on{background:var(--accent-soft);color:var(--accent)}
+
+/* ---- command palette ----------------------------------------------------- */
+.cmdk{display:inline-flex;align-items:center;gap:9px;padding:5px 8px 5px 11px;
+  border:1px solid var(--line);border-radius:4px;background:var(--panel-2);
+  color:var(--ink-3);cursor:pointer;font:400 12px/1.5 var(--sans);min-width:150px}
+.cmdk:hover{border-color:var(--ink-4);color:var(--ink-2);background:var(--panel)}
+.cmdk-t{flex:1;text-align:left}
+kbd{font:500 10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2px;
+  border-radius:3px;padding:3px 5px;background:var(--panel);color:var(--ink-4)}
+
+.pal-wrap{position:fixed;inset:0;z-index:140;display:grid;place-items:start center;
+  padding:12vh 16px 16px}
+.pal-scrim{position:fixed;inset:0;background:rgba(14,16,20,.55)}
+.pal{position:relative;width:min(560px,100%);background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-lg);
+  overflow:hidden;animation:palIn .13s ease}
+@keyframes palIn{from{opacity:0;transform:translateY(-5px)}}
+.pal-in{display:flex;align-items:center;gap:10px;padding:12px 14px;
+  border-bottom:1px solid var(--line);color:var(--ink-4)}
+.pal-in input{flex:1;border:0;background:none;padding:0;font:400 14.5px/1.4 var(--sans);
+  color:var(--ink)}
+.pal-in input:focus-visible{outline:none}
+.pal-list{max-height:min(52vh,420px);overflow-y:auto;padding:6px}
+.pal-group{font:500 9.5px/1 var(--mono);letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ink-4);padding:11px 10px 6px}
+.pal-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:4px;
+  cursor:pointer;color:var(--ink-2)}
+.pal-item .pi{display:grid;place-items:center;color:var(--ink-4);flex:none}
+.pal-item .pl{font-size:13.5px;font-weight:500;color:var(--ink);white-space:nowrap}
+.pal-item .ph{font:400 11.5px/1 var(--mono);color:var(--ink-4);margin-left:auto;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pal-item.on{background:var(--accent-soft)}
+.pal-item.on .pl,.pal-item.on .pi{color:var(--accent)}
+.pal-item:hover{background:var(--panel-2)}
+.pal-empty{padding:22px 16px;text-align:center;font-size:12.5px;color:var(--ink-3);
+  line-height:1.6}
+@media(max-width:768px){ .cmdk-t,.cmdk kbd{display:none} .cmdk{min-width:0;padding:5px 8px} }
+
+/* ---- table controls: sort + filter --------------------------------------- */
+.tctl{display:flex;align-items:center;gap:11px;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:var(--panel-2)}
+.tsearch{display:flex;align-items:center;gap:7px;flex:1 1 200px;max-width:300px;
+  border:1px solid var(--line);border-radius:4px;background:var(--panel);
+  padding:0 9px;color:var(--ink-4)}
+.tsearch:focus-within{border-color:var(--accent);
+  box-shadow:0 0 0 2px var(--accent-soft);color:var(--accent)}
+.tsearch input{border:0;background:none;padding:6px 0;font-size:12.5px;color:var(--ink)}
+.tsearch input:focus-visible{outline:none}
+.tsearch input::-webkit-search-cancel-button{cursor:pointer}
+.tcount{font:400 11px/1 var(--mono);color:var(--ink-4);margin-left:auto;white-space:nowrap}
+
+th.sortable{padding:0}
+.thsort{display:flex;align-items:center;gap:5px;width:100%;padding:9px 14px;
+  background:none;border:0;cursor:pointer;color:inherit;font:inherit;
+  letter-spacing:inherit;text-transform:inherit;text-align:left}
+th.num .thsort{justify-content:flex-end}
+.thsort:hover{color:var(--ink-2);background:var(--line-2)}
+.thsort .ic{opacity:.45}
+.thsort:hover .ic{opacity:.8}
+th[aria-sort="ascending"] .thsort,th[aria-sort="descending"] .thsort{color:var(--accent)}
+th[aria-sort="ascending"] .ic,th[aria-sort="descending"] .ic{opacity:1}
+
+/* ---- copy to clipboard --------------------------------------------------- */
+.copyable{display:inline-flex;align-items:center;gap:5px;max-width:100%;min-width:0}
+.copyable .cv{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cbtn{display:inline-grid;place-items:center;width:20px;height:20px;padding:0;flex:none;
+  border:1px solid transparent;border-radius:3px;background:none;color:var(--ink-4);
+  cursor:pointer;transition:color .12s,background .12s,border-color .12s}
+.cbtn:hover{color:var(--accent);background:var(--accent-soft);border-color:var(--accent-line)}
+.cbtn.done{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-line)}
+.copyable:hover .cbtn{color:var(--ink-3)}
+.copyable:hover .cbtn:hover{color:var(--accent)}
+
+/* ---- screen-reader only -------------------------------------------------- */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
 /* ---------------------------------------------------------------- responsive */
 .burger{display:none}
 @media(max-width:1300px){.g6{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(2,1fr)}}
@@ -562,6 +658,15 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px soli
    shrink: the lifecycle rail loses its values, wide tables scroll in place,
    and the version rail becomes a single scrollable row. */
 @media(max-width:768px){
+  /* Two columns cannot hold a label plus a 40-character artifact URI at phone
+     width; the pair stacks so the value gets the full line and its copy
+     control stays reachable. */
+  /* minmax(0,1fr) rather than 1fr: a grid track defaults to min-content, and an
+     unbreakable 64-character hash was pushing the column wider than the card. */
+  .kv{grid-template-columns:minmax(0,1fr);gap:2px 0}
+  .kv dt{font-size:11.5px;color:var(--ink-4);margin-top:8px;min-width:0}
+  .kv dd{margin-bottom:2px;min-width:0}
+  .copyable{max-width:100%}
   .lcrail .val{display:none}
   .lcrail .st{min-width:66px}
   .lcrail .join{width:14px}

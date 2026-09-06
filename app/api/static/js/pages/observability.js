@@ -1,10 +1,32 @@
+/* The ranges the metrics endpoints actually accept. `window_minutes` is the
+   only time parameter this API takes -- there is no from/to, so an arbitrary
+   date picker would be inventing one. */
+const OBS_WINDOWS = [
+  { label:"15m", minutes:15 }, { label:"1h", minutes:60 },
+  { label:"6h", minutes:360 }, { label:"24h", minutes:1440 },
+  { label:"7d", minutes:10080 },
+];
+let OBS_WINDOW = 60;
+
 PAGES.monitoring = {
-  title: "Monitoring",
+  title: "Observability",
   intro: "Service throughput, latency against SLO, resource usage, live model quality, and open alerts.",
   refresh: 15000,
   async render(){
-    const r = await loadAll({ sum:"/api/v1/monitoring/summary", perf:"/api/v1/monitoring/performance",
+    const w = OBS_WINDOW;
+    const r = await loadAll({ sum:`/api/v1/monitoring/summary?window_minutes=${w}`,
+      perf:"/api/v1/monitoring/performance",
       res:"/api/v1/monitoring/resources", alerts:"/api/v1/alerts" }, 4000);
+
+    const picker = `<div class="rangebar">
+      <span class="rl">Window</span>
+      <div class="rseg" role="group" aria-label="Metrics window">
+        ${OBS_WINDOWS.map(o => `<button class="rb ${o.minutes === w ? "on" : ""}"
+          data-window="${o.minutes}" aria-pressed="${o.minutes === w}">${o.label}</button>`).join("")}
+      </div>
+      <span class="dim" style="font-size:11.5px;margin-left:auto">Applies to inference and
+        latency; resources and alerts are point-in-time.</span>
+    </div>`;
 
     const svc = (r.sum.ok ? r.sum.data.service : {}) || {};
     const inference = card("Inference", `<div class="grid g4">
@@ -52,7 +74,7 @@ PAGES.monitoring = {
           `<button class="btn" data-act="ack" data-id="${esc(a.id)}">Acknowledge</button>` },
     ], list, { empty:"No alerts raised." }), { flush:true }), "alerts");
 
-    return `<div class="grid g2">${inference}${latency}</div>` + resources + live + alerts;
+    return picker + `<div class="grid g2">${inference}${latency}</div>` + resources + live + alerts;
   }
 };
 
@@ -161,4 +183,20 @@ PAGES.retraining = {
 
     return status + pipeline + events;
   }
+};
+
+
+/* Window buttons re-render against the new range. The value lives in a module
+   variable rather than the URL because it is a view preference, not an
+   addressable location. */
+PAGES.monitoring.wire = function(){
+  document.querySelectorAll("[data-window]").forEach(b => b.onclick = () => {
+    const next = Number(b.dataset.window);
+    if(next === OBS_WINDOW) return;
+    OBS_WINDOW = next;
+    api.bust();
+    const w = OBS_WINDOWS.find(o => o.minutes === next);
+    announce(`Metrics window ${w ? w.label : next + " minutes"}`);
+    render();
+  });
 };

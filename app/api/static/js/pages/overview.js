@@ -154,7 +154,7 @@ PAGES.overview = {
               <span class="pip"></span>
               <div><div class="when">${when(e.created_at)}</div>
                 <div class="what">${esc(String(e.action || "").replace(/[._]/g," "))}</div>
-                <div class="det">${esc(e.resource_id || e.resource || "")}${
+                <div class="det">${esc(e.resource_id || "")}${
                   e.actor ? " · " + esc(e.actor) : ""}</div></div></div>`;
           }).join("") + `</div>`;
         })();

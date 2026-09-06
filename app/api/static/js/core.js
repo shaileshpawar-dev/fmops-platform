@@ -41,13 +41,119 @@ function kpi(label, value, meta){
   return `<div class="kpi"><div class="k">${esc(label)}</div>
     <div class="v">${value}</div><div class="m">${meta||"&nbsp;"}</div></div>`; }
 
+/* Sorting and filtering happen here rather than in each page, so every table
+   in the console behaves the same way. A column opts in with `sort` (a value
+   accessor); `opts.filter` adds a text box that matches across the accessors.
+   Both are client-side over rows already fetched -- no endpoint gains a query
+   parameter it does not have. */
+let TABLE_SEQ = 0;
+const TABLE_STATE = {};
+
 function table(cols, rows, opts){
   const o = opts || {};
-  if(!rows || !rows.length) return emptyState(o.empty || "No records.");
-  const head = cols.map(c => `<th${c.num?' class="num"':""}>${esc(c.label)}</th>`).join("");
-  const body = rows.map(r => `<tr class="${o.rowClass ? esc(o.rowClass(r)) : ""}">` + cols.map(c =>
+  const all = rows || [];
+  const sortable = cols.some(c => c.sort);
+  const id = (o.id || `t${++TABLE_SEQ}`);
+  const st = TABLE_STATE[id] || (TABLE_STATE[id] = { key:o.sortKey || null,
+                                                     dir:o.sortDir || "desc", q:"" });
+  TABLE_STATE[id].cols = cols;
+  TABLE_STATE[id].rows = all;
+  TABLE_STATE[id].opts = o;
+
+  let view = all;
+  if(o.filter && st.q){
+    const q = st.q.toLowerCase();
+    view = view.filter(r => cols.some(c => {
+      const v = c.sort ? c.sort(r) : (c.text ? c.text(r) : null);
+      return v != null && String(v).toLowerCase().includes(q);
+    }));
+  }
+  if(st.key){
+    const col = cols.find(c => c.label === st.key);
+    if(col && col.sort){
+      const mul = st.dir === "asc" ? 1 : -1;
+      view = view.slice().sort((a, b) => {
+        const x = col.sort(a), y = col.sort(b);
+        if(x == null && y == null) return 0;
+        if(x == null) return 1;          // absent values sort last either way
+        if(y == null) return -1;
+        if(typeof x === "number" && typeof y === "number") return (x - y) * mul;
+        return String(x).localeCompare(String(y), undefined, { numeric:true }) * mul;
+      });
+    }
+  }
+
+  const controls = o.filter ? `<div class="tctl">
+      <label class="tsearch">${icon("search", 14)}
+        <input type="search" data-tfilter="${esc(id)}" value="${esc(st.q)}"
+          placeholder="${esc(o.filter === true ? "Filter" : o.filter)}"
+          aria-label="${esc(o.filter === true ? "Filter rows" : o.filter)}"></label>
+      <span class="tcount" role="status">${view.length} of ${all.length}</span>
+    </div>` : "";
+
+  if(!all.length) return controls + emptyState(o.empty || "No records.");
+  if(!view.length) return controls + emptyState(
+    `Nothing matches "${st.q}". Clear the filter to see all ${all.length} rows.`);
+
+  const head = cols.map(c => {
+    const on = st.key === c.label;
+    const cls = [c.num ? "num" : "", c.sort ? "sortable" : ""].filter(Boolean).join(" ");
+    const aria = c.sort ? ` aria-sort="${on ? (st.dir === "asc" ? "ascending" : "descending") : "none"}"` : "";
+    const inner = c.sort
+      ? `<button class="thsort" data-tsort="${esc(id)}" data-col="${esc(c.label)}">
+           ${esc(c.label)}${icon(on ? (st.dir === "asc" ? "sortAsc" : "sortDesc") : "sortNone", 13)}</button>`
+      : esc(c.label);
+    return `<th scope="col"${cls ? ` class="${cls}"` : ""}${aria}>${inner}</th>`;
+  }).join("");
+
+  const body = view.map(r => `<tr class="${o.rowClass ? esc(o.rowClass(r)) : ""}">` + cols.map(c =>
     `<td${c.num?' class="num"':""}>${c.render(r)}</td>`).join("") + "</tr>").join("");
-  return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`; }
+  return controls + `<div class="scroll"><table><thead><tr>${head}</tr></thead>
+    <tbody>${body}</tbody></table></div>`;
+}
+
+/* Re-render just the table that changed, in place. Delegated once so tables
+   rendered after this point still respond. */
+function wireTables(){
+  if(window.__tablesWired) return;
+  window.__tablesWired = true;
+  document.addEventListener("click", e => {
+    const b = e.target.closest("[data-tsort]");
+    if(!b) return;
+    const id = b.getAttribute("data-tsort"), col = b.getAttribute("data-col");
+    const st = TABLE_STATE[id];
+    if(!st) return;
+    if(st.key === col) st.dir = st.dir === "asc" ? "desc" : "asc";
+    else { st.key = col; st.dir = "desc"; }
+    redrawTable(id, b);
+    announce(`Sorted by ${col}, ${st.dir === "asc" ? "ascending" : "descending"}`);
+  });
+  document.addEventListener("input", e => {
+    const f = e.target.closest("[data-tfilter]");
+    if(!f) return;
+    const id = f.getAttribute("data-tfilter");
+    const st = TABLE_STATE[id];
+    if(!st) return;
+    st.q = f.value;
+    const host = redrawTable(id, f);
+    if(host){
+      const again = host.querySelector(`[data-tfilter="${id}"]`);
+      if(again){ again.focus(); again.setSelectionRange(st.q.length, st.q.length); }
+    }
+  });
+}
+
+function redrawTable(id, fromEl){
+  const st = TABLE_STATE[id];
+  if(!st) return null;
+  /* The rendered table and its controls share a parent; replacing that
+     parent's contents keeps the surrounding card untouched. */
+  const host = fromEl.closest(".body") || fromEl.parentElement.parentElement;
+  if(!host) return null;
+  const opts = Object.assign({}, st.opts, { id });
+  host.innerHTML = table(st.cols, st.rows, opts);
+  return host;
+}
 
 function emptyState(msg){ return `<div class="state"><div class="big">Nothing to show</div>${esc(msg)}</div>`; }
 function unavailable(reason){
@@ -67,9 +173,13 @@ function barList(items, opts){
   return `<div style="display:grid;gap:8px">` + items.map(i => {
     const w = Math.max(1, Math.min(100, (Math.abs(i.value)/max)*100));
     const cls = i.bad ? "bad" : (i.good ? "ok" : "");
-    return `<div style="display:grid;grid-template-columns:minmax(120px,1.1fr) 3fr minmax(64px,auto) auto;
+    /* Feature names are long -- `num_late_payments_12m` needs 145px and was
+       being cut off in a 120px column. The label track now sizes to content up
+       to a cap, and anything past that ellipsises with the full name on hover
+       rather than silently losing characters. */
+    return `<div style="display:grid;grid-template-columns:minmax(120px,max-content) 3fr minmax(64px,auto) auto;
       gap:10px;align-items:center">
-      <span class="mono" style="font-size:11.5px">${esc(i.label)}</span>
+      <span class="mono blabel" style="font-size:11.5px" title="${esc(i.label)}">${esc(i.label)}</span>
       <div class="bar"><i class="${cls}" style="width:${w}%"></i></div>
       <span class="num">${typeof i.value === "number" ? i.value.toFixed(4) : esc(i.value)}</span>
       <span>${i.tag||""}</span></div>`; }).join("") + `</div>`; }
@@ -174,13 +284,50 @@ async function authRequired(){
   return AUTH_REQUIRED;
 }
 
+/* Keyboard containment for anything that overlays the page.
+ *
+ * Returns a release function. Without this, Tab from an open dialog walks into
+ * the page behind it -- the user is "inside" a modal that the keyboard has
+ * already left, which is worse than having no dialog at all.
+ */
+function trapFocus(container, onEscape){
+  const previous = document.activeElement;
+  const sel = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),'
+            + 'textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+  const focusables = () => [...container.querySelectorAll(sel)]
+    .filter(el => el.offsetParent !== null || el === document.activeElement);
+
+  function onKey(e){
+    if(e.key === "Escape"){ e.preventDefault(); if(onEscape) onEscape(); return; }
+    if(e.key !== "Tab") return;
+    const list = focusables();
+    if(!list.length) return;
+    const first = list[0], last = list[list.length - 1];
+    if(e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+    else if(!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+  }
+  container.addEventListener("keydown", onKey);
+  const first = focusables()[0];
+  if(first) first.focus();
+
+  return function release(){
+    container.removeEventListener("keydown", onKey);
+    /* Return the caret to whatever opened the dialog, so keyboard position is
+       not lost when it closes. */
+    if(previous && typeof previous.focus === "function" && document.contains(previous)){
+      previous.focus();
+    }
+  };
+}
+
 function confirmAction(opts){
   return new Promise(resolve => {
     const m = document.createElement("div");
     m.className = "modal";
-    m.innerHTML = `<div class="box">
+    const titleId = `acT${++COPY_SEQ}`;
+    m.innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
       <div class="body" style="padding:16px">
-        <h3>${esc(opts.title)}</h3>
+        <h3 id="${titleId}">${esc(opts.title)}</h3>
         <p style="color:var(--ink-2);margin:8px 0 12px;font-size:12.5px">${esc(opts.body)}</p>
         ${opts.needsKey ? `<label style="font-size:11.5px;color:var(--ink-3)">API key (X-API-Key)</label>
           <input type="password" id="ackey" autocomplete="off" placeholder="required for write actions">
@@ -192,7 +339,8 @@ function confirmAction(opts){
         </div>
       </div></div>`;
     document.body.appendChild(m);
-    const done = v => { m.remove(); resolve(v); };
+    const release = trapFocus(m, () => done(null));
+    const done = v => { release(); m.remove(); resolve(v); };
     $("#acno", m).onclick = () => done(null);
     $("#acyes", m).onclick = () => done({ key: opts.needsKey ? ($("#ackey", m).value || "") : "" });
     m.onclick = e => { if(e.target === m) done(null); };
@@ -446,4 +594,173 @@ function sect2(n, title, sub){
     ${n ? `<span class="n">${esc(n)}</span>` : ""}
     <h3>${esc(title)}</h3>
     ${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>`;
+}
+
+/* ==========================================================================
+ * Run status -- one map, used everywhere
+ *
+ * There were three of these: automlStatusBadge, runStatusBadge and
+ * statusBadge, each with its own idea of what a state looks like. The same
+ * `rejected` run rendered grey on AutoML, amber on Training and red in the
+ * guided workflow, which makes state colour meaningless the moment a reader
+ * moves between pages.
+ *
+ * One map. A terminal negative outcome is red whether the pipeline called it
+ * "failed" or "rejected" -- both mean the model cannot proceed.
+ * ========================================================================== */
+const RUN_STATE = {
+  // terminal, good
+  completed:"ok", succeeded:"ok", approved:"ok", passed:"ok", live:"ok",
+  healthy:"ok", promoted:"ok", ready:"ok",
+  // terminal, good with caveats
+  completed_with_warnings:"warn", degraded:"warn", warning:"warn",
+  pending_manual:"warn", skipped:"warn",
+  // terminal, bad
+  failed:"bad", rejected:"bad", error:"bad", unhealthy:"bad", cancelled:"bad",
+  rolled_back:"bad", blocked:"bad",
+  // in flight
+  running:"info", training:"info", profiling:"info", ranking:"info",
+  deploying:"info", in_progress:"info", pending:"info",
+  // not started
+  queued:"mute", not_started:"mute", unknown:"mute",
+};
+const RUN_IN_FLIGHT = new Set(["running","training","profiling","ranking",
+                               "deploying","in_progress","queued","pending"]);
+
+function runStatusBadge(status){
+  const s = String(status || "unknown").toLowerCase();
+  const label = s.replace(/_/g, " ");
+  return badge(label, RUN_STATE[s] || "mute", RUN_IN_FLIGHT.has(s));
+}
+
+/* ==========================================================================
+ * Icons
+ *
+ * One set, drawn on a 24-unit grid at a single stroke weight, inheriting
+ * currentColor so a nav item and a button never disagree. Inline rather than
+ * a font or a sprite request: the console has no guaranteed egress and this
+ * costs nothing to ship.
+ *
+ * Glyph characters were doing this job before. They came from whatever the
+ * viewer's font stack happened to resolve, sat on different baselines, and
+ * one of them -- a heart, for Runtime -- was a leftover from when the page
+ * was called System Health.
+ * ========================================================================== */
+const ICON_PATHS = {
+  grid:      "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  layers:    "M12 3 3 8l9 5 9-5-9-5zM3 13l9 5 9-5M3 17.5l9 5 9-5",
+  deploy:    "M12 20V6M12 6 6 12M12 6l6 6M5 3h14",
+  bell:      "M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6M10.5 20a2 2 0 0 0 3 0",
+  database:  "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  sliders:   "M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2M16 4v4M10 10v4M16 16v4",
+  chip:      "M7 7h10v10H7zM9 3v4M15 3v4M9 17v4M15 17v4M3 9h4M3 15h4M17 9h4M17 15h4",
+  beaker:    "M9 3v6.5L4.5 18A2 2 0 0 0 6.3 21h11.4a2 2 0 0 0 1.8-3L15 9.5V3M8 3h8M7.5 14h9",
+  activity:  "M3 12h4l3 8 4-16 3 8h4",
+  wave:      "M3 12c2.5-5 4.5 5 7 0s4.5 5 7 0 2-3 4-3",
+  refresh:   "M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5",
+  shieldOk:  "M12 3 5 6v6c0 4.4 3 8.2 7 9 4-.8 7-4.6 7-9V6l-7-3zM9 12l2 2 4-4",
+  list:      "M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01",
+  server:    "M3 5h18v6H3zM3 13h18v6H3zM7 8h.01M7 16h.01",
+  message:   "M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z",
+  fileText:  "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5zM14 3v5h5M9 13h6M9 17h4",
+  checkSq:   "M4 4h16v16H4zM8.5 12l2.5 2.5 4.5-5",
+  coins:     "M9 4c3.9 0 7 1.1 7 2.5S12.9 9 9 9 2 7.9 2 6.5 5.1 4 9 4zM2 6.5v5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-5M15 11.5c3.9 0 7 1.1 7 2.5s-3.1 2.5-7 2.5M8 14v3.5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V14",
+  shield:    "M12 3 5 6v6c0 4.4 3 8.2 7 9 4-.8 7-4.6 7-9V6l-7-3z",
+  external:  "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+  search:    "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",
+  copy:      "M9 9h10v10H9zM5 15V5h10",
+  check:     "M5 12.5 10 17 19 7",
+  plus:      "M12 5v14M5 12h14",
+  sortAsc:   "M7 15l5-5 5 5",
+  sortDesc:  "M7 9l5 5 5-5",
+  sortNone:  "M8 10l4-4 4 4M8 14l4 4 4-4",
+  close:     "M6 6l12 12M18 6 6 18",
+};
+
+/* 16px default: it sits on the cap height of 13px UI text without optical
+   correction, which is why nav labels and icons line up. */
+function icon(name, size){
+  const d = ICON_PATHS[name];
+  if(!d) return "";
+  const s = size || 16;
+  return `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${d}"/></svg>`;
+}
+
+/* ==========================================================================
+ * Copy to clipboard
+ *
+ * Hashes, run ids and commits are the values most likely to be pasted into a
+ * terminal or a ticket, and until now they could only be selected by hand.
+ * ========================================================================== */
+let COPY_SEQ = 0;
+
+/* Renders a value with a copy control. `value` is the full string to copy;
+   `shown` is what the reader sees, so a 64-character hash can be truncated on
+   screen while the whole thing reaches the clipboard. */
+function copyable(value, shown, opts){
+  if(value == null || value === "") return NA;
+  const o = opts || {};
+  const id = `cp${++COPY_SEQ}`;
+  const text = String(value);
+  return `<span class="copyable">
+    <span class="cv ${o.mono === false ? "" : "mono"}">${esc(shown == null ? text : String(shown))}</span>
+    <button class="cbtn" data-copy="${esc(text)}" id="${id}"
+      title="Copy ${esc(o.label || "value")}"
+      aria-label="Copy ${esc(o.label || "value")}: ${esc(text)}">${icon("copy", 13)}</button>
+  </span>`;
+}
+
+/* Delegated once at the document level, so markup rendered later still works
+   without every page re-binding handlers. */
+function wireCopyButtons(){
+  if(window.__copyWired) return;
+  window.__copyWired = true;
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-copy]");
+    if(!b) return;
+    const text = b.getAttribute("data-copy");
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch(err){
+      /* clipboard API needs a secure context; fall back to a selection copy so
+         this still works over plain HTTP, which is how the demo is served. */
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { ok = document.execCommand("copy"); } catch(e2){ ok = false; }
+      ta.remove();
+    }
+    if(ok){
+      const original = b.innerHTML;
+      b.innerHTML = icon("check", 13);
+      b.classList.add("done");
+      setTimeout(() => { b.innerHTML = original; b.classList.remove("done"); }, 1100);
+      announce("Copied to clipboard");
+    } else {
+      toast("Could not copy. Select the value and copy manually.", "bad");
+    }
+  });
+}
+
+/* A single polite live region. Status changes that are obvious visually are
+   otherwise silent to a screen reader. */
+function announce(message){
+  let el = $("#a11y-status");
+  if(!el){
+    el = document.createElement("div");
+    el.id = "a11y-status";
+    el.className = "sr-only";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    document.body.appendChild(el);
+  }
+  el.textContent = "";
+  setTimeout(() => { el.textContent = message; }, 30);
 }

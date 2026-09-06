@@ -62,11 +62,6 @@ PAGES.training = {
   }
 };
 
-function runStatusBadge(s){
-  const map = { completed:"ok", rejected:"warn", failed:"bad", running:"info", queued:"mute" };
-  return badge(s || "unknown", map[s] || "mute", s === "running" || s === "queued");
-}
-
 function renderRunDetail(run){
   const rep = run.report || {}, m = run.metrics || {};
   const stages = ["Dataset","Validation","Features","Training"];

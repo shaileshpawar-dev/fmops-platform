@@ -154,3 +154,118 @@ def test_live_metrics_are_not_attributed_to_a_non_serving_version(api_client):
     body = _joined(api_client)
     assert "IS NOT SERVING TRAFFIC" in body
     assert "not per model version" in body
+
+
+# --------------------------------------------------------------------------- #
+# Consistency and craft
+# --------------------------------------------------------------------------- #
+def test_run_status_has_exactly_one_colour_map(api_client):
+    """The same state must not be a different colour on a different page.
+
+    There were three helpers -- automlStatusBadge, runStatusBadge and
+    statusBadge -- and a `rejected` run rendered grey on AutoML, amber on
+    Training and red in the guided workflow.
+    """
+    body = _joined(api_client)
+    assert "function runStatusBadge(" in body
+    assert body.count("function runStatusBadge(") == 1, "more than one status map"
+    for gone in ("function automlStatusBadge(", "function statusBadge("):
+        assert gone not in body, f"{gone} is back; state colour will diverge again"
+    assert "const RUN_STATE" in body
+
+
+def test_icons_are_svg_not_glyphs(api_client):
+    """One icon system, drawn rather than borrowed from a font.
+
+    Glyph characters resolved differently per platform, sat on inconsistent
+    baselines, and one of them was a heart labelling the Runtime page.
+    """
+    body = _joined(api_client)
+    assert "function icon(" in body and "ICON_PATHS" in body
+    assert 'stroke-width="1.75"' in body, "icons no longer share one stroke weight"
+    # Nav entries name an icon, not a character.
+    for pid, name in (("overview", "grid"), ("runtime", "server"), ("models", "layers")):
+        assert f'["{pid}",' in body
+        assert f'"{name}"' in body, f"{pid} has no {name} icon"
+
+
+def test_tables_support_sorting_and_filtering(api_client):
+    """Scanning is the point of a control plane; sorting is how you scan."""
+    body = _joined(api_client)
+    assert "function wireTables(" in body
+    assert "aria-sort=" in body, "sorted columns are not announced"
+    assert 'scope="col"' in body, "table headers are not scoped"
+    assert "data-tfilter" in body and "data-tsort" in body
+
+
+def test_command_palette_navigates_and_claims_no_search_backend(api_client):
+    """A palette over existing routes, not a pretend search API.
+
+    There is no search endpoint in this platform, and the empty state says so
+    rather than implying results are missing.
+    """
+    body = _joined(api_client)
+    assert "function openPalette(" in body
+    assert "aria-keyshortcuts" in body
+    assert "does not search" in body, "the palette overstates what it can find"
+    # It must not invent an endpoint.
+    assert "/api/v1/search" not in body
+
+
+def test_copy_to_clipboard_has_a_plain_http_fallback(api_client):
+    """The deployed console is served over HTTP, where navigator.clipboard is
+    unavailable -- so the fallback is the path that actually runs."""
+    body = _joined(api_client)
+    assert "function copyable(" in body
+    assert "navigator.clipboard" in body
+    assert "execCommand" in body, "no fallback for a non-secure context"
+    assert "Could not copy" in body, "a failed copy is silent"
+
+
+def test_overlays_trap_focus(api_client):
+    """Tab must not walk out of an open dialog into the page behind it."""
+    body = _joined(api_client)
+    assert "function trapFocus(" in body
+    assert 'role="dialog"' in body and 'aria-modal="true"' in body
+
+
+def test_workflow_is_split_and_every_module_is_served(api_client):
+    """The guided workflow was one 1,700-line file."""
+    page = api_client.get("/dashboard").text
+    for mod in ("project.js", "project-steps.js", "project-wire.js"):
+        assert f"/static/js/pages/{mod}" in page, f"{mod} is not loaded"
+        assert api_client.get(f"/static/js/pages/{mod}").status_code == 200
+    body = _joined(api_client)
+    # The step map must resolve lazily: the renderers load after project.js.
+    assert "function stepRenderer(" in body
+    assert "const STEP_RENDER" not in body
+
+
+def test_metrics_window_uses_the_parameter_the_api_accepts(api_client):
+    """window_minutes is the only time parameter monitoring takes."""
+    from app.api.routes import monitoring  # noqa: F401
+
+    spec = api_client.get("/openapi.json").json()
+    params = spec["paths"]["/api/v1/monitoring/summary"]["get"].get("parameters", [])
+    assert any(p["name"] == "window_minutes" for p in params)
+
+    body = _joined(api_client)
+    assert "OBS_WINDOWS" in body
+    assert "window_minutes=${" in body, "the window selector does not reach the API"
+
+
+def test_audit_table_reads_fields_the_api_returns(api_client):
+    """Resource and Status read `e.resource` and `e.status`, which this API has
+    never returned -- both columns rendered empty on every row."""
+    entries = api_client.get("/api/v1/audit?limit=1").json()["entries"]
+    if entries:
+        row = entries[0]
+        assert "resource_type" in row and "outcome" in row
+        assert "resource" not in row and "status" not in row
+
+    body = _joined(api_client).replace(" ", "")
+    assert "e.resource_type" in body and "e.outcome" in body
+    # `e.resource` and `e.status` are not fields this API returns. Guard the
+    # exact phantom accessors rather than any string containing them.
+    for phantom in ("e.resource||", "e.resource)", "e.status?", "e.status||"):
+        assert phantom not in body, f"phantom audit field is back: {phantom}"

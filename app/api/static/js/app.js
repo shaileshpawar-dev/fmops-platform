@@ -17,22 +17,22 @@
        Infrastructure: there is no AWS introspection here. */
 const NAV = [
   { group:"Control", items:[
-      ["overview","Command Center","▤"], ["models","Models","▫"],
-      ["deployments","Deployments","⇪"], ["incidents","Incidents","⚠"] ] },
+      ["overview","Command Center","grid"], ["models","Models","layers"],
+      ["deployments","Deployments","deploy"], ["incidents","Incidents","bell"] ] },
   { group:"Build", items:[
-      ["datasets","Datasets","▦"], ["training","Training","⚙"],
-      ["automl","AutoML","✦"], ["experiments","Experiments","⌷"] ] },
+      ["datasets","Datasets","database"], ["training","Training","sliders"],
+      ["automl","AutoML","chip"], ["experiments","Experiments","beaker"] ] },
   { group:"Operate", items:[
-      ["monitoring","Observability","◴"], ["drift","Drift","∿"],
-      ["retraining","Retraining","⟳"] ] },
+      ["monitoring","Observability","activity"], ["drift","Drift","wave"],
+      ["retraining","Retraining","refresh"] ] },
   { group:"Govern", items:[
-      ["gates","Quality Gates","⚖"], ["audit","Audit","☰"],
-      ["runtime","Runtime","♡"] ] },
+      ["gates","Quality Gates","shieldOk"], ["audit","Audit","list"],
+      ["runtime","Runtime","server"] ] },
   { group:"LLMOps", items:[
-      ["llm-overview","Overview","◇"], ["llm-prompts","Prompts","¶"],
-      ["llm-evals","Evaluations","✓"], ["llm-cost","Tokens & Cost","$"],
-      ["llm-safety","Safety","⛨"] ] },
-  { group:"", items:[ ["__docs","API Docs","↗"] ] },
+      ["llm-overview","Overview","message"], ["llm-prompts","Prompts","fileText"],
+      ["llm-evals","Evaluations","checkSq"], ["llm-cost","Tokens & Cost","coins"],
+      ["llm-safety","Safety","shield"] ] },
+  { group:"", items:[ ["__docs","API Docs","external"] ] },
 ];
 
 /* Counts shown in the rail come from the dashboard payload the shell already
@@ -45,13 +45,14 @@ function buildNav(){
     <a class="btn pri" href="#/newproject">+ New ML Project</a></div>`;
   $("#nav").innerHTML = cta + NAV.map(sec =>
     (sec.group ? `<div class="navgrp">${esc(sec.group)}</div>` : "") +
-    sec.items.map(([id,label,icon]) => {
+    sec.items.map(([id,label,glyph]) => {
       if(id === "__docs") return `<a class="navlink" href="/docs" target="_blank" rel="noopener">
-        <span class="ico">${icon}</span>${esc(label)}</a>`;
+        <span class="ico">${icon(glyph)}</span>${esc(label)}</a>`;
       const c = NAV_COUNTS[id];
       const cnt = (c && c.n) ? `<span class="cnt ${c.alert?"alert":""}">${esc(String(c.n))}</span>` : "";
-      return `<a class="navlink ${id===cur?"on":""}" href="#/${id}">
-        <span class="ico">${icon}</span>${esc(label)}${cnt}</a>`;
+      return `<a class="navlink ${id===cur?"on":""}" href="#/${id}"
+        ${id===cur?'aria-current="page"':""}>
+        <span class="ico">${icon(glyph)}</span>${esc(label)}${cnt}</a>`;
     }).join("")
   ).join("");
 }
@@ -75,6 +76,7 @@ async function render(){
   if(sub) sub.textContent = page.intro || "";
   document.title = `${page.title} · FMOps Platform`;
   const view = $("#main");
+  view.setAttribute("aria-busy", "true");
   view.innerHTML = loadingPanel(page.title);
 
   if(refreshTimer){ clearInterval(refreshTimer); refreshTimer = null; }
@@ -84,6 +86,8 @@ async function render(){
   catch(e){ html = errorState(e.message || String(e), id); }
   if(route() !== id) return;                       // navigated away mid-load
   view.innerHTML = html;
+  view.setAttribute("aria-busy", "false");
+  announce(`${page.title} loaded`);
   stampRefresh();
 
   /* Auto-refresh only where it is genuinely useful, only while the tab is
@@ -331,6 +335,7 @@ async function header(){
        actually reports -- an absent section leaves its entry unnumbered
        rather than showing a zero it did not confirm. */
     const model = d.model || {}, alerts = d.alerts || {};
+    window.__dashModel = model;   // the palette reads versions from here
     const next = {};
     if(model.available && model.total_versions != null)
       next.models = { n: model.total_versions };
@@ -348,18 +353,200 @@ async function header(){
 (function boot(){
   const saved = localStorage.getItem("fmops-theme");   // a UI preference, not data
   if(saved) document.documentElement.setAttribute("data-theme", saved);
+  const syncTheme = t => {
+    const btn = $("#theme");
+    btn.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
+    btn.setAttribute("aria-label", t === "dark"
+      ? "Switch to light theme" : "Switch to dark theme");
+  };
+  syncTheme(document.documentElement.getAttribute("data-theme") || "light");
   $("#theme").onclick = () => {
     const cur = document.documentElement.getAttribute("data-theme");
     const next = cur === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
+    syncTheme(next);
+    announce(`${next === "dark" ? "Dark" : "Light"} theme`);
     try { localStorage.setItem("fmops-theme", next); } catch(e){ /* private mode */ }
   };
   $("#refresh").onclick = () => { api.bust(); render(); header(); toast("Reloaded."); };
-  $("#burger").onclick = () => $("#side").classList.toggle("open");
+  $("#cmdk").onclick = () => openPalette();
+  $("#burger").onclick = () => {
+    const open = $("#side").classList.toggle("open");
+    $("#burger").setAttribute("aria-expanded", open ? "true" : "false");
+    if(open){ const first = $("#nav .navlink"); if(first) first.focus(); }
+  };
   $("#nav").addEventListener("click", e => {
     if(e.target.closest(".navlink")) $("#side").classList.remove("open"); });
   window.addEventListener("hashchange", render);
   if(!location.hash) location.hash = "#/overview";
+  wireCopyButtons();
+  wireTables();
+  wirePalette();
   render(); header(); renderSideFoot();
   setInterval(header, 30000);
 })();
+
+/* ==========================================================================
+ * Command palette
+ *
+ * Cmd/Ctrl-K. Navigation only: every entry resolves to a route that already
+ * exists, plus the model versions the registry actually reports. It calls no
+ * endpoint of its own -- the version list is whatever the shell fetched for
+ * the sidebar count, so opening the palette costs nothing.
+ *
+ * Deliberately not a search API. There is no search endpoint in this backend,
+ * and a palette that pretended to search would be inventing one.
+ * ========================================================================== */
+let PALETTE_ITEMS = null;
+let PALETTE_SEL = 0;
+
+function paletteItems(){
+  const nav = [];
+  NAV.forEach(sec => sec.items.forEach(([id, label, glyph]) => {
+    if(id === "__docs"){
+      nav.push({ label:"API Docs", group:"Open", icon:glyph, href:"/docs", external:true });
+    } else {
+      nav.push({ label, group:sec.group || "Navigate", icon:glyph, hash:`#/${id}` });
+    }
+  }));
+  nav.push({ label:"New ML Project", group:"Navigate", icon:"plus", hash:"#/newproject" });
+  return nav;
+}
+
+/* Model versions come from the dashboard payload the header already holds, so
+   the palette adds no request. If it has not loaded yet the palette simply
+   shows routes -- it never blocks on a fetch. */
+function paletteVersions(){
+  const m = (window.__dashModel || {});
+  const name = m.model_name;
+  if(!name || !Array.isArray(m.versions)) return [];
+  return m.versions.slice()
+    .sort((a, b) => b.version - a.version)
+    .slice(0, 25)
+    .map(v => ({
+      label: `v${v.version}`,
+      hint: `${name} · ${v.stage || "unknown"}${v.algorithm ? " · " + v.algorithm : ""}`,
+      group: "Model versions",
+      icon: "layers",
+      hash: `#/models/${v.version}`,
+    }));
+}
+
+function openPalette(){
+  if($("#palette")) return;
+  PALETTE_ITEMS = paletteItems().concat(paletteVersions());
+  PALETTE_SEL = 0;
+  const el = document.createElement("div");
+  el.className = "pal-wrap";
+  el.id = "palette";
+  el.innerHTML = `
+    <div class="pal-scrim" data-pal-close></div>
+    <div class="pal" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div class="pal-in">${icon("search", 16)}
+        <input id="pal-q" type="text" autocomplete="off" spellcheck="false"
+          placeholder="Go to a page or a model version…"
+          aria-label="Search pages and model versions"
+          aria-controls="pal-list" aria-activedescendant="pal-0" role="combobox"
+          aria-expanded="true">
+        <kbd>Esc</kbd></div>
+      <div class="pal-list" id="pal-list" role="listbox" aria-label="Results"></div>
+    </div>`;
+  document.body.appendChild(el);
+  renderPalette("");
+
+  const q = $("#pal-q");
+  q.focus();
+  q.oninput = () => { PALETTE_SEL = 0; renderPalette(q.value); };
+  q.onkeydown = e => {
+    const rows = [...document.querySelectorAll(".pal-item")];
+    if(e.key === "ArrowDown"){ e.preventDefault(); PALETTE_SEL = Math.min(PALETTE_SEL + 1, rows.length - 1); }
+    else if(e.key === "ArrowUp"){ e.preventDefault(); PALETTE_SEL = Math.max(PALETTE_SEL - 1, 0); }
+    else if(e.key === "Enter"){ e.preventDefault(); if(rows[PALETTE_SEL]) rows[PALETTE_SEL].click(); return; }
+    else if(e.key === "Escape"){ e.preventDefault(); closePalette(); return; }
+    else return;
+    highlightPalette(rows);
+  };
+  el.addEventListener("click", e => {
+    if(e.target.closest("[data-pal-close]")) closePalette();
+    const item = e.target.closest(".pal-item");
+    if(!item) return;
+    const href = item.getAttribute("data-href"), hash = item.getAttribute("data-hash");
+    closePalette();
+    if(href) window.open(href, "_blank", "noopener");
+    else if(hash) location.hash = hash;
+  });
+}
+
+function highlightPalette(rows){
+  rows.forEach((r, i) => {
+    const on = i === PALETTE_SEL;
+    r.classList.toggle("on", on);
+    r.setAttribute("aria-selected", on ? "true" : "false");
+    if(on){
+      r.scrollIntoView({ block:"nearest" });
+      const q = $("#pal-q");
+      if(q) q.setAttribute("aria-activedescendant", r.id);
+    }
+  });
+}
+
+function renderPalette(query){
+  const q = String(query || "").trim().toLowerCase();
+  const hits = !q ? PALETTE_ITEMS : PALETTE_ITEMS.filter(it =>
+    it.label.toLowerCase().includes(q) ||
+    (it.hint || "").toLowerCase().includes(q) ||
+    (it.group || "").toLowerCase().includes(q));
+
+  const list = $("#pal-list");
+  if(!hits.length){
+    list.innerHTML = `<div class="pal-empty">Nothing matches &ldquo;${esc(query)}&rdquo;.
+      The palette navigates pages and model versions &mdash; it does not search
+      datasets or runs, because this platform has no search endpoint.</div>`;
+    return;
+  }
+  let html = "", lastGroup = null, i = 0;
+  hits.forEach(it => {
+    if(it.group !== lastGroup){
+      html += `<div class="pal-group">${esc(it.group)}</div>`;
+      lastGroup = it.group;
+    }
+    html += `<div class="pal-item ${i === PALETTE_SEL ? "on" : ""}" id="pal-${i}"
+      role="option" aria-selected="${i === PALETTE_SEL}"
+      ${it.hash ? `data-hash="${esc(it.hash)}"` : ""}
+      ${it.href ? `data-href="${esc(it.href)}"` : ""}>
+      <span class="pi">${icon(it.icon || "grid", 15)}</span>
+      <span class="pl">${esc(it.label)}</span>
+      ${it.hint ? `<span class="ph">${esc(it.hint)}</span>` : ""}
+      ${it.external ? `<span class="ph">opens a new tab</span>` : ""}
+    </div>`;
+    i++;
+  });
+  list.innerHTML = html;
+}
+
+function closePalette(){
+  const el = $("#palette");
+  if(el) el.remove();
+  const t = $("#cmdk");
+  if(t) t.focus();
+}
+
+function wirePalette(){
+  if(window.__palWired) return;
+  window.__palWired = true;
+  document.addEventListener("keydown", e => {
+    const key = (e.key || "").toLowerCase();
+    if((e.metaKey || e.ctrlKey) && key === "k"){
+      e.preventDefault();
+      $("#palette") ? closePalette() : openPalette();
+    }
+    /* "/" is the other convention, but only when the caret is not already in
+       a field -- otherwise it swallows a legitimate slash. */
+    if(key === "/" && !$("#palette")){
+      const t = e.target;
+      const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"
+        || t.tagName === "SELECT" || t.isContentEditable);
+      if(!typing){ e.preventDefault(); openPalette(); }
+    }
+  });
+}
