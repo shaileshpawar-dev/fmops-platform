@@ -574,10 +574,10 @@ function attentionQueue(alerts, opts){
     return `<div class="row">
       <span class="sev ${esc(sev)}"></span>
       <div>
-        <div class="ttl">${esc(a.title || a.name || a.kind || "Alert")}</div>
+        <div class="ttl">${esc(a.title || "Alert")}</div>
         <div class="msg">${esc(a.message || "")}</div>
         <div class="meta">${esc(sev)} · ${when(a.created_at)}${
-          a.source ? " · " + esc(a.source) : ""}</div>
+          a.category ? " · " + esc(a.category) : ""}</div>
       </div>
       ${a.acknowledged ? badge("acknowledged","mute")
         : `<button class="btn" data-act="ack" data-id="${esc(a.id)}">Acknowledge</button>`}

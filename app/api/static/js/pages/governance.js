@@ -215,9 +215,9 @@ PAGES.incidents = {
           { label:"Severity", render:a => badge(a.severity || "info",
               /crit|error/i.test(a.severity || "") ? "bad"
               : /warn/i.test(a.severity || "") ? "warn" : "info") },
-          { label:"Alert", render:a => `<b>${esc(a.title || a.name || a.kind || "Alert")}</b>` },
+          { label:"Alert", render:a => `<b>${esc(a.title || "Alert")}</b>` },
           { label:"Message", render:a => esc(String(a.message || "").slice(0, 120)) },
-          { label:"Source", render:a => `<span class="mono dim">${esc(a.source || "-")}</span>` },
+          { label:"Category", render:a => `<span class="mono dim">${esc(a.category || "-")}</span>` },
           { label:"Raised", render:a => when(a.created_at) },
         ], ack, { empty:"" })
       : emptyState("No alerts have been acknowledged."),

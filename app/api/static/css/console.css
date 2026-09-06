@@ -19,7 +19,7 @@
    it is simply opt-in rather than inherited. */
 :root{
   --bg:#fbfbfc; --panel:#ffffff; --panel-2:#f5f6f8; --raised:#ffffff;
-  --ink:#16181d; --ink-2:#454b58; --ink-3:#6b7280; --ink-4:#9aa1ae;
+  --ink:#16181d; --ink-2:#454b58; --ink-3:#6b7280; --ink-4:#5f6673;
   --line:#e4e6eb; --line-2:#eff0f4;
   --accent:#4f46e5; --accent-soft:#eeedfd; --accent-line:#c8c4f7; --accent-ink:#ffffff;
   --ok:#047857; --ok-bg:#ecfdf5; --ok-line:#a7f3d0;
@@ -37,7 +37,7 @@
 }
 :root[data-theme="dark"]{
   --bg:#0e1014; --panel:#161920; --panel-2:#12151a; --raised:#1a1e27;
-  --ink:#e8eaef; --ink-2:#a7aebc; --ink-3:#79818f; --ink-4:#5c6472;
+  --ink:#e8eaef; --ink-2:#a7aebc; --ink-3:#838b9a; --ink-4:#98a1b0;
   --line:#262a33; --line-2:#1d212a;
   --accent:#8b90f5; --accent-soft:#1c1b3a; --accent-line:#37357a; --accent-ink:#0e1014;
   --ok:#4ade80; --ok-bg:#0e2a1d; --ok-line:#14532d;
