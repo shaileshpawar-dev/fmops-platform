@@ -219,16 +219,39 @@ const api = (() => {
     }
     return body;
   }
+  /* GET with a short TTL so switching pages does not re-hit the same
+     endpoint repeatedly. Stable data gets a longer TTL than live data. */
+  async function cachedGet(path, ttlMs){
+    const ttl = ttlMs === undefined ? 8000 : ttlMs;
+    const hit = cache.get(path);
+    if(hit && ttl > 0 && (Date.now() - hit.t) < ttl) return hit.v;
+    const v = await raw(path);
+    cache.set(path, { t: Date.now(), v });
+    return v;
+  }
+
   return {
-    /* GET with a short TTL so switching pages does not re-hit the same
-       endpoint repeatedly. Stable data gets a longer TTL than live data. */
-    async get(path, ttlMs){
-      const ttl = ttlMs === undefined ? 8000 : ttlMs;
-      const hit = cache.get(path);
-      if(hit && ttl > 0 && (Date.now() - hit.t) < ttl) return hit.v;
-      const v = await raw(path);
-      cache.set(path, { t: Date.now(), v });
-      return v;
+    get: cachedGet,
+
+    /* Some endpoints answer a question with a non-2xx status and a complete
+       body. /health/ready returns 503 when the process is up but has no
+       servable model -- correct, because a load balancer has to be able to
+       act on it -- and the body carries the reason. Routing that through the
+       normal error path renders "Unable to load data" over the single line
+       the reader actually needs.
+       Only the codes named by the caller are accepted, so a genuine 500, a
+       proxy error page or a non-JSON body still raises. The accepted
+       response is deliberately not cached: it is live state, and the caller
+       polls it. */
+    async getState(path, accept, ttlMs){
+      try { return await cachedGet(path, ttlMs); }
+      catch(e){
+        const codes = accept || [];
+        if(e && codes.indexOf(e.status) !== -1 && e.body && typeof e.body === "object"){
+          return e.body;
+        }
+        throw e;
+      }
     },
     post(path, body, apiKey){
       const headers = { "Content-Type": "application/json", "Accept": "application/json" };
@@ -241,11 +264,20 @@ const api = (() => {
 })();
 
 /* Load several endpoints at once; a failure on one does not sink the page. */
+/* A value is either a path, or `{path, accept}` where `accept` lists the
+   non-2xx status codes whose body is a real answer rather than a failure. */
 async function loadAll(spec, ttl){
   const keys = Object.keys(spec);
   const out = {};
   await Promise.all(keys.map(async k => {
-    try { out[k] = { ok: true, data: await api.get(spec[k], ttl) }; }
+    const s = spec[k];
+    const path = typeof s === "string" ? s : s.path;
+    const accept = typeof s === "string" ? null : s.accept;
+    try {
+      out[k] = { ok: true,
+                 data: accept ? await api.getState(path, accept, ttl)
+                              : await api.get(path, ttl) };
+    }
     catch(e){ out[k] = { ok: false, error: e.message || String(e) }; }
   }));
   return out;

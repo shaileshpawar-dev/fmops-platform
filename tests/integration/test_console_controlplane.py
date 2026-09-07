@@ -269,3 +269,29 @@ def test_audit_table_reads_fields_the_api_returns(api_client):
     # exact phantom accessors rather than any string containing them.
     for phantom in ("e.resource||", "e.resource)", "e.status?", "e.status||"):
         assert phantom not in body, f"phantom audit field is back: {phantom}"
+
+
+def test_readiness_503_is_shown_as_a_state_not_a_transport_error(api_client):
+    """``/health/ready`` returns 503 when the process is up but has no servable
+    model. That is the probe working as designed -- a load balancer has to be
+    able to act on it -- and the body carries the reason.
+
+    The console sent it through the generic error path, so Runtime rendered
+    "Unable to load data" over the one line a reader needs: *why* it is not
+    ready. The client now accepts an explicitly named status as a state.
+    """
+    r = api_client.get("/health/ready")
+    assert r.status_code in (200, 503)
+    body = r.json()
+    assert {"status", "checks", "detail"} <= set(body)
+    if r.status_code == 503:
+        assert body["status"] == "not_ready"
+        assert body["detail"], "a 503 readiness answer carries no reason to show"
+
+    src = re.sub(r"\s+", "", _joined(api_client))
+    assert "getState(" in src, "the client cannot accept a non-2xx status as a state"
+    assert "accept:[503]" in src, "the runtime page does not accept the readiness 503"
+    # The escape hatch must stay narrow: anything not named still raises, so a
+    # real 500 or an HTML proxy page cannot be mistaken for an answer.
+    assert "throwe;" in src, "getState swallows every error, not just the named ones"
+    assert "errorState(" in src, "the generic error path is gone"

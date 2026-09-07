@@ -60,7 +60,12 @@ PAGES.runtime = {
   intro: "Health, readiness, resource usage and effective configuration of the running "
        + "process. This reads the service, not the cloud — there is no AWS introspection here.",
   async render(){
-    const r = await loadAll({ health:"/health", ready:"/health/ready", cfg:"/api/v1/config",
+    /* Readiness answers 503 when the process is healthy but has no servable
+       model. That is the probe working as designed -- the load balancer has
+       to be able to act on it -- and the body says why. Accept it as a state
+       so the card shows the reason instead of a transport error. */
+    const r = await loadAll({ health:"/health",
+      ready:{ path:"/health/ready", accept:[503] }, cfg:"/api/v1/config",
       res:"/api/v1/monitoring/resources" }, 5000);
 
     const health = sect(r.health, d => card("API health", `
