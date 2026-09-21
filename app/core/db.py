@@ -27,7 +27,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -303,6 +303,61 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         updated_at TEXT NOT NULL
     )
     """,
+    # ---------------- gate decisions --------------------------------------- #
+    # Immutable: one row per automated verdict and per human sign-off.
+    """
+    CREATE TABLE IF NOT EXISTS gate_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        model_name TEXT NOT NULL,
+        model_version INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        target_stage TEXT,
+        final_stage TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        checks TEXT NOT NULL DEFAULT '[]',
+        comparison TEXT,
+        thresholds TEXT NOT NULL DEFAULT '{}',
+        actor TEXT,
+        comment TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    # ---------------- jobs -------------------------------------------------- #
+    # The execution of long operations. The operation's own record (training
+    # run, AutoML run, retraining event, deployment) is linked by resource_id.
+    """
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        model_name TEXT,
+        resource_id TEXT,
+        payload TEXT NOT NULL DEFAULT '{}',
+        result TEXT,
+        error TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        requested_by TEXT,
+        idempotency_key TEXT,
+        retry_of TEXT,
+        worker TEXT,
+        heartbeat_at TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS job_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        level TEXT NOT NULL,
+        message TEXT NOT NULL,
+        context TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )
+    """,
     # ---------------- indexes --------------------------------------------- #
     "CREATE INDEX IF NOT EXISTS ix_inference_created ON inference_log (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_inference_request ON inference_log (request_id)",
@@ -318,6 +373,27 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_training_runs_created ON training_runs (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_automl_runs_created ON automl_runs (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_deploy_endpoint ON deployments (endpoint_name, updated_at)",
+    "CREATE INDEX IF NOT EXISTS ix_gate_model ON gate_decisions (model_name, model_version, id)",
+    "CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs (status, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_jobs_resource ON jobs (resource_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_jobs_idempotency ON jobs (idempotency_key) "
+    "WHERE idempotency_key IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_job_logs ON job_logs (job_id, id)",
+)
+
+
+# Columns added after a table first shipped. ``CREATE TABLE IF NOT EXISTS`` never
+# alters an existing table, so an upgraded deployment would otherwise keep the
+# old shape forever. Each entry is applied only when the column is absent, which
+# makes the list safe to run on every start, against any prior version.
+COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # v2: the input contract each model version was trained against.
+    ("model_versions", "signature", "TEXT"),
+    # v2: AutoML runs produce a named model, with an explicit positive class.
+    ("automl_runs", "model_name", "TEXT"),
+    ("automl_runs", "positive_label", "TEXT"),
+    ("training_runs", "target_column", "TEXT"),
+    ("training_runs", "positive_label", "TEXT"),
 )
 
 
@@ -356,6 +432,7 @@ class Database:
             conn = self.connection
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
+            self._migrate_columns(conn)
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -364,6 +441,14 @@ class Database:
         logger.debug(
             "database.ready", extra={"db_path": str(self.path), "schema": SCHEMA_VERSION}
         )
+
+    @staticmethod
+    def _migrate_columns(conn: sqlite3.Connection) -> None:
+        for table, column, ddl in COLUMN_MIGRATIONS:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                logger.info("database.column_added", extra={"table": table, "column": column})
 
     # -- operations --------------------------------------------------------- #
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:

@@ -11,11 +11,13 @@ name: CD
 #
 # Production requires a GitHub Environment approval. That is the human gate the
 # platform's own `require_manual_approval` setting mirrors.
+#
+# Status: NOT wired to the live deployment. The running ECS service is updated
+# by registering an image-only task-definition revision (docs/deployment.md).
+# This workflow runs only when vars.AWS_ROLE_ARN and vars.ECR_REGISTRY are set,
+# which this repository does not set, so it is manual-dispatch only.
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       environment:

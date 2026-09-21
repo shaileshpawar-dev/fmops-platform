@@ -19,8 +19,10 @@ mechanisms cooperate:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -142,8 +144,13 @@ class DatasetRegistry:
         dataset_name: str | None = None,
         description: str = "",
         use_dvc: bool = True,
+        parent_version: str | None = None,
     ) -> DatasetVersion:
         """Register a dataset file and return its immutable version record.
+
+        ``parent_version`` records what this version was derived from (a
+        retraining set names the dataset it extended). Without it the parent is
+        the previous version of the same dataset name.
 
         Registering identical bytes twice returns the existing version rather
         than creating a duplicate -- versions are content, not events.
@@ -155,49 +162,54 @@ class DatasetRegistry:
         dataset_name = dataset_name or self.settings.data.dataset_name
         content_hash = hash_file(source)
 
-        manifest = self._load()
-        for existing in manifest["versions"]:
-            if (
-                existing["content_hash"] == content_hash
-                and existing["dataset_name"] == dataset_name
-            ):
-                logger.info(
-                    "dataset.version_exists",
-                    extra={"version": existing["version"], "hash": content_hash[:12]},
-                )
-                return DatasetVersion(**existing)
+        existing = self._find(content_hash, dataset_name)
+        if existing is not None:
+            return existing
 
+        # Everything slow -- reading the file, DVC -- happens before the lock.
         frame = pd.read_csv(source, nrows=200_000)
-        siblings = [v for v in manifest["versions"] if v["dataset_name"] == dataset_name]
-        ordinal = len(siblings) + 1
-        version = f"v{ordinal}-{content_hash[:8]}"
-        parent = siblings[-1]["version"] if siblings else None
-
         tracked = False
         if use_dvc:
             tracked, message = self.dvc.add(source)
             if not tracked:
                 logger.info("dataset.dvc_skipped", extra={"reason": message})
+        details = {
+            "dataset_name": dataset_name,
+            "path": str(source),
+            "content_hash": content_hash,
+            "n_rows": len(frame),
+            "n_columns": int(frame.shape[1]),
+            "columns": [str(c) for c in frame.columns],
+            "size_bytes": source.stat().st_size,
+            "git_commit": git_commit(self.settings.paths.data_dir.parent),
+            "dvc_tracked": tracked,
+            "description": description,
+            "stats": _frame_stats(frame, self.settings),
+        }
 
-        record = DatasetVersion(
-            version=version,
-            dataset_name=dataset_name,
-            path=str(source),
-            content_hash=content_hash,
-            n_rows=int(len(frame)),
-            n_columns=int(frame.shape[1]),
-            columns=[str(c) for c in frame.columns],
-            size_bytes=source.stat().st_size,
-            git_commit=git_commit(self.settings.paths.data_dir.parent),
-            dvc_tracked=tracked,
-            parent_version=parent,
-            description=description,
-            stats=_frame_stats(frame, self.settings),
-            created_at=utcnow_iso(),
-        )
-        manifest["versions"].append(record.model_dump(mode="json"))
-        manifest["updated_at"] = utcnow_iso()
-        self._save(manifest)
+        # The manifest itself is read-modified-written; with more than one API
+        # process two uploads could each drop the other's entry. The database
+        # write lock is shared by every process, so it serialises this step --
+        # which is only the check-and-append, not the work above.
+        from app.core.db import get_database
+
+        with get_database().transaction():
+            manifest = self._load()
+            duplicate = self._find(content_hash, dataset_name, manifest)
+            if duplicate is not None:
+                return duplicate
+            siblings = [v for v in manifest["versions"] if v["dataset_name"] == dataset_name]
+            version = f"v{len(siblings) + 1}-{content_hash[:8]}"
+            record = DatasetVersion(
+                version=version,
+                parent_version=parent_version
+                or (siblings[-1]["version"] if siblings else None),
+                created_at=utcnow_iso(),
+                **details,
+            )
+            manifest["versions"].append(record.model_dump(mode="json"))
+            manifest["updated_at"] = utcnow_iso()
+            self._save(manifest)
         logger.info(
             "dataset.registered",
             extra={
@@ -209,6 +221,21 @@ class DatasetRegistry:
         )
         return record
 
+    def _find(
+        self, content_hash: str, dataset_name: str, manifest: dict[str, Any] | None = None
+    ) -> DatasetVersion | None:
+        for existing in (manifest or self._load())["versions"]:
+            if (
+                existing["content_hash"] == content_hash
+                and existing["dataset_name"] == dataset_name
+            ):
+                logger.info(
+                    "dataset.version_exists",
+                    extra={"version": existing["version"], "hash": content_hash[:12]},
+                )
+                return DatasetVersion(**existing)
+        return None
+
     def register_frame(
         self,
         frame: pd.DataFrame,
@@ -216,13 +243,27 @@ class DatasetRegistry:
         filename: str | None = None,
         description: str = "",
         use_dvc: bool = True,
+        parent_version: str | None = None,
     ) -> DatasetVersion:
-        """Persist an in-memory frame to ``data/processed`` and register it."""
+        """Persist an in-memory frame to ``data/processed`` and register it.
+
+        The file name carries the content hash. A version is an immutable
+        snapshot: writing to a fixed name would let the next upload of
+        "churn.csv" -- or the next retraining run -- overwrite the bytes an
+        earlier version and every model trained on it still point at.
+        """
         dataset_name = dataset_name or self.settings.data.dataset_name
-        target = self.settings.paths.processed_dir / (filename or f"{dataset_name}.csv")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(target, index=False)
-        return self.register(target, dataset_name, description, use_dvc)
+        stem = Path(filename or f"{dataset_name}.csv").stem
+        directory = self.settings.paths.processed_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        staging = directory / f".{stem}-{uuid.uuid4().hex}.tmp"
+        frame.to_csv(staging, index=False)
+        target = directory / f"{stem}-{hash_file(staging)[:12]}.csv"
+        if target.exists():
+            staging.unlink()  # identical bytes are already on disk
+        else:
+            os.replace(staging, target)
+        return self.register(target, dataset_name, description, use_dvc, parent_version)
 
     # -- lookup -------------------------------------------------------------- #
     def list_versions(self, dataset_name: str | None = None) -> list[DatasetVersion]:
@@ -335,7 +376,12 @@ def build_profile(
 
     target: dict[str, float] = {}
     if cfg.target_column in frame:
-        series = pd.to_numeric(frame[cfg.target_column], errors="coerce").dropna()
+        raw = frame[cfg.target_column].dropna()
+        if cfg.class_labels:
+            positive = str(cfg.class_labels[1])
+            series = (raw.astype(str) == positive).astype(int)
+        else:
+            series = pd.to_numeric(raw, errors="coerce").dropna()
         if not series.empty:
             target = {
                 "positive_rate": float((series == 1).mean()),

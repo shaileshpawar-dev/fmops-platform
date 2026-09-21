@@ -6,7 +6,9 @@
       create retraining event
               |
               v
-      collect the latest data  (training set + labelled production traffic)
+      collect the data  (serving version's training set + labelled production
+                         traffic + an optional new dataset version -- never
+                         anything generated)
               |
               v
       validate  -- invalid data aborts here, the production model keeps serving
@@ -29,8 +31,10 @@
 
 The rule that matters: **a new model never replaces the incumbent just because
 it is new.** It must clear the absolute approval gate *and* beat production on
-the configured metric by at least ``min_improvement``. Both decisions, with
-their numbers, are recorded on the retraining event.
+the configured metric by at least ``min_improvement``. Where the environment
+requires a human sign-off, a candidate that clears both is held for approval
+rather than promoted. Every decision, with its numbers, is recorded on the
+retraining event and as a gate decision on the candidate version.
 """
 
 from __future__ import annotations
@@ -43,13 +47,13 @@ import pandas as pd
 from app.core.config import Settings, get_settings
 from app.core.exceptions import DataValidationError, FMOpsError
 from app.core.logging import StageTimer, get_logger, log_context
-from app.data.generator import build_production_dataset
 from app.data.versioning import get_dataset_registry
 from app.deployment.manager import DeploymentManager, get_deployment_manager
 from app.monitoring.alerts import get_alert_manager
 from app.monitoring.inference_log import get_inference_log
 from app.monitoring.metrics import get_metrics
 from app.registry.base import ModelRegistry
+from app.registry.context import data_config_for, default_model_name, signature_of
 from app.registry.factory import get_registry
 from app.retraining.trigger import (
     RetrainingEventStore,
@@ -59,6 +63,7 @@ from app.retraining.trigger import (
 )
 from app.schemas.common import (
     AlertCategory,
+    ApprovalDecision,
     DeploymentStrategy,
     ModelStage,
     RetrainingStatus,
@@ -68,7 +73,9 @@ from app.schemas.common import (
 from app.schemas.deployment import DeploymentRequest
 from app.schemas.evaluation import RetrainingDecision
 from app.schemas.model import TrainingRequest
-from app.training.approval import compare_to_production, evaluate_approval
+from app.training.approval import evaluate_approval
+from app.training.decisions import get_gate_decisions
+from app.training.holdout import compare_on_shared_holdout
 from app.training.train import train_model
 
 logger = get_logger(__name__)
@@ -108,9 +115,25 @@ class RetrainingPipeline:
         decision: TriggerDecision | None = None,
         deploy: bool | None = None,
         collect_production_data: bool = True,
+        model_name: str | None = None,
+        dataset_version: str | None = None,
+        checkpoint: Any = None,
+        on_event: Any = None,
     ) -> RetrainingDecision:
-        model_name = self.settings.tracking.registered_model_name
-        decision = decision or evaluate_trigger(force=force)
+        """One retraining cycle for one model.
+
+        ``dataset_version`` is new training data the operator uploaded; it is
+        combined with the serving version's training set and any labelled
+        production traffic. Supplying it counts as a manual trigger.
+
+        ``checkpoint`` (from the job runner) is called between stages and raises
+        when the job was cancelled; ``on_event`` receives the event id as soon as
+        the event exists, so the job links to it before the long part starts.
+        """
+        model_name = model_name or default_model_name(self.settings)
+        if dataset_version is not None:
+            force = True
+        decision = decision or evaluate_trigger(force=force, model_name=model_name)
 
         if not decision.should_retrain:
             logger.info("retraining.skipped", extra={"reason": decision.reason})
@@ -123,6 +146,12 @@ class RetrainingPipeline:
             )
 
         baseline = self.registry.get_production(model_name)
+        base = self.registry.get_serving(model_name) or self.registry.get_latest(model_name)
+        if base is None:
+            raise FMOpsError(
+                f"model {model_name} has no registered versions; train it before retraining",
+                model=model_name,
+            )
         event = self.store.create(
             trigger=decision.trigger or RetrainingTrigger.MANUAL,
             reason=decision.reason,
@@ -130,6 +159,8 @@ class RetrainingPipeline:
             baseline_version=baseline.version if baseline else None,
             detail=decision.evidence,
         )
+        if on_event is not None:
+            on_event(event.id)
         metrics = get_metrics()
 
         with log_context(retraining_event=event.id, model=model_name):
@@ -139,12 +170,15 @@ class RetrainingPipeline:
                 result = self._execute(
                     event_id=event.id,
                     model_name=model_name,
+                    base_version=base,
+                    new_dataset_version=dataset_version,
                     baseline_version=baseline.version if baseline else None,
                     baseline_metrics=baseline.metrics if baseline else None,
                     trigger=decision.trigger or RetrainingTrigger.MANUAL,
                     reason=decision.reason,
                     deploy=deploy,
                     collect_production_data=collect_production_data,
+                    checkpoint=checkpoint,
                 )
             except DataValidationError as exc:
                 # The retraining data is unusable. Production keeps serving.
@@ -153,6 +187,7 @@ class RetrainingPipeline:
                     "retraining aborted: the collected data failed validation; "
                     "the production model is unchanged",
                     exc,
+                    model_name,
                 )
                 metrics.retraining_events_total.labels(
                     trigger=(decision.trigger or RetrainingTrigger.MANUAL).value,
@@ -172,7 +207,7 @@ class RetrainingPipeline:
                     ),
                 )
             except FMOpsError as exc:
-                self._fail(event.id, f"retraining failed: {exc.message}", exc)
+                self._fail(event.id, f"retraining failed: {exc.message}", exc, model_name)
                 metrics.retraining_events_total.labels(
                     trigger=(decision.trigger or RetrainingTrigger.MANUAL).value,
                     status=RetrainingStatus.FAILED.value,
@@ -180,7 +215,15 @@ class RetrainingPipeline:
                 ).inc()
                 raise
             except Exception as exc:
-                self._fail(event.id, f"retraining failed: {exc}", exc)
+                if exc.__class__.__name__ == "JobCancelled":
+                    self.store.update(
+                        event.id,
+                        status=RetrainingStatus.FAILED,
+                        decision="cancelled",
+                        detail={"message": "cancelled by request; production is unchanged"},
+                    )
+                    raise
+                self._fail(event.id, f"retraining failed: {exc}", exc, model_name)
                 metrics.retraining_events_total.labels(
                     trigger=(decision.trigger or RetrainingTrigger.MANUAL).value,
                     status=RetrainingStatus.FAILED.value,
@@ -211,28 +254,48 @@ class RetrainingPipeline:
         self,
         event_id: str,
         model_name: str,
+        base_version: Any,
+        new_dataset_version: str | None,
         baseline_version: int | None,
         baseline_metrics: dict[str, float] | None,
         trigger: RetrainingTrigger,
         reason: str,
         deploy: bool | None,
         collect_production_data: bool,
+        checkpoint: Any = None,
     ) -> RetrainingDecision:
-        # ---- 1. collect the latest data --------------------------------- #
+        def check() -> None:
+            if checkpoint is not None:
+                checkpoint()
+
+        # ---- 1. collect the data ----------------------------------------- #
+        data_config = data_config_for(base_version, self.settings)
         with StageTimer(logger, "retraining.collect_data"):
-            dataset_version = self._collect_data(collect_production_data)
+            dataset_version, sources = self._collect_data(
+                model_name,
+                base_version,
+                data_config,
+                collect_production_data,
+                new_dataset_version,
+            )
+        self.store.update(event_id, detail={"data_sources": sources, "trigger_reason": reason})
+        check()
 
         # ---- 2/3. validate + train (the standard pipeline does both) ----- #
+        # Under the model's own data contract: the reference model's settings
+        # would validate a churn dataset against the loan schema.
         with StageTimer(logger, "retraining.train"):
             run = train_model(
                 TrainingRequest(
+                    model_name=model_name,
                     dataset_version=dataset_version,
                     run_name=f"retrain-{event_id[:12]}",
                     tags={
                         "fmops.retraining_event": event_id,
                         "fmops.trigger": trigger.value,
                     },
-                )
+                ),
+                settings=self.settings.model_copy(update={"data": data_config}, deep=True),
             )
 
         candidate_version = run.registered_version
@@ -242,11 +305,11 @@ class RetrainingPipeline:
 
         # ---- 4. compare against production ------------------------------- #
         with StageTimer(logger, "retraining.compare"):
-            comparison = compare_to_production(
-                run.evaluation.metrics,
-                baseline_metrics,
-                candidate_version=candidate_version,
-                baseline_version=baseline_version,
+            # Both scored on the rows of the candidate's holdout that the
+            # incumbent never trained on -- not each on its own test split.
+            comparison = compare_on_shared_holdout(
+                self.registry.get(model_name, candidate_version),
+                self.registry.get(model_name, baseline_version) if baseline_version else None,
                 settings=self.settings,
             )
             approval = evaluate_approval(
@@ -262,6 +325,7 @@ class RetrainingPipeline:
 
         detail: dict[str, Any] = {
             "trigger_reason": reason,
+            "data_sources": sources,
             "dataset_version": run.dataset_version,
             "candidate_metrics": run.evaluation.metrics.as_dict(),
             "baseline_metrics": baseline_metrics or {},
@@ -270,7 +334,7 @@ class RetrainingPipeline:
         }
 
         # ---- 5. decide ---------------------------------------------------- #
-        if not approval.approved:
+        if approval.decision == ApprovalDecision.REJECTED:
             return self._reject(
                 event_id,
                 model_name,
@@ -300,7 +364,29 @@ class RetrainingPipeline:
                 category="worse_than_production",
             )
 
+        if approval.decision == ApprovalDecision.PENDING_MANUAL:
+            return self._hold_for_approval(
+                event_id,
+                model_name,
+                candidate_version,
+                baseline_version,
+                trigger,
+                reason,
+                comparison,
+                approval,
+                detail,
+            )
+
         # ---- 6. promote and deploy ---------------------------------------- #
+        self._record_decision(
+            model_name,
+            candidate_version,
+            "approved",
+            f"retraining candidate cleared the gate and beat production ({reason})",
+            approval,
+            comparison,
+            ModelStage.STAGING,
+        )
         should_deploy = (
             self.settings.retraining.auto_deploy_if_better if deploy is None else deploy
         )
@@ -329,6 +415,7 @@ class RetrainingPipeline:
         )
 
         if should_deploy:
+            check()
             with StageTimer(logger, "retraining.deploy"):
                 result = self.deployments.deploy(
                     DeploymentRequest(
@@ -394,76 +481,235 @@ class RetrainingPipeline:
             message=message,
         )
 
-    def _collect_data(self, collect_production_data: bool) -> str | None:
-        """Assemble the retraining dataset.
+    def _collect_data(
+        self,
+        model_name: str,
+        base_version: Any,
+        data_config: Any,
+        collect_production_data: bool,
+        new_dataset_version: str | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Assemble the retraining dataset from real rows only.
 
-        Combines the existing training set with labelled production traffic when
-        any exists. When there is no labelled traffic (the common case early on),
-        a fresh sample from the current production distribution is generated so
-        the retrained model sees the *shifted* distribution rather than the stale
-        one -- which is the entire point of retraining after drift.
+        Three sources, all observed: the training set the base version was
+        fitted on, an optional new dataset version supplied by the operator, and
+        this model's labelled production traffic. Nothing is generated. If the
+        combination adds no rows beyond the base training set, the run says so
+        on the event rather than pretending the data is new.
         """
         registry = get_dataset_registry()
-        base = registry.latest()
-        if base is None:
-            raise FMOpsError("no dataset is registered; cannot retrain")
+        if not base_version.dataset_version:
+            raise FMOpsError(
+                f"{model_name} v{base_version.version} has no recorded training dataset; "
+                "retraining needs one to start from",
+                model=model_name,
+            )
+        target = data_config.target_column
+        base_record = registry.get(base_version.dataset_version)
+        base_frame = registry.load(base_version.dataset_version)
+        # Identity columns travel with every row when the base dataset has them;
+        # a declared schema (the reference dataset's) may require them.
+        identity = [
+            c
+            for c in (data_config.id_column, data_config.timestamp_column)
+            if c and c in base_frame.columns
+        ]
+        columns = [*data_config.feature_columns, target, *identity]
+        frames: list[pd.DataFrame] = [base_frame]
+        observed: pd.DataFrame | None = None
+        sources: dict[str, Any] = {
+            "base_dataset": base_version.dataset_version,
+            "base_rows": len(base_frame),
+            "new_dataset": new_dataset_version,
+            "new_dataset_rows": 0,
+            "labelled_production_rows": 0,
+        }
 
-        frames: list[pd.DataFrame] = [registry.load(base.version)]
+        if new_dataset_version:
+            fresh = registry.load(new_dataset_version)
+            missing = [c for c in columns if c not in fresh.columns]
+            if missing:
+                raise FMOpsError(
+                    f"dataset {new_dataset_version} lacks columns {model_name} was trained on: "
+                    f"{', '.join(missing[:8])}",
+                    model=model_name,
+                    dataset_version=new_dataset_version,
+                )
+            frames.append(fresh)
+            sources["new_dataset_rows"] = len(fresh)
 
         if collect_production_data:
-            labelled = get_inference_log().labelled_frame(
-                self.settings.tracking.registered_model_name
-            )
-            appended = 0
+            labelled = get_inference_log().labelled_frame(model_name)
             if not labelled.empty and "actual_label" in labelled:
-                columns = [
-                    *self.settings.data.feature_columns,
-                    self.settings.data.target_column,
-                ]
-                production = labelled.rename(
-                    columns={"actual_label": self.settings.data.target_column}
+                # Feedback is stored as 0/1; the training frame speaks the
+                # target's own labels, so map back before combining.
+                signature = signature_of(base_version)
+                raw_labels = signature.class_labels if signature else ["0", "1"]
+                production = labelled.copy()
+                production[target] = production["actual_label"].map(
+                    lambda v: raw_labels[int(v)] if pd.notna(v) else None
                 )
+                if not data_config.class_labels:
+                    production[target] = pd.to_numeric(production[target], errors="coerce")
+                # A production row has an identity and a time of its own: the
+                # request id and when it was served. Carrying them keeps every
+                # row traceable back to the inference log.
+                if data_config.id_column in identity:
+                    production[data_config.id_column] = production["request_id"]
+                if data_config.timestamp_column in identity:
+                    production[data_config.timestamp_column] = production["created_at"]
                 available = [c for c in columns if c in production.columns]
-                if self.settings.data.target_column in available:
-                    frames.append(production[available])
-                    appended = len(production)
-            logger.info(
-                "retraining.production_data_collected",
-                extra={
-                    "labelled_rows": appended,
-                    "detail": (
-                        "labelled production traffic appended"
-                        if appended
-                        else "no labelled production traffic available; "
-                        "sampling the current production distribution instead"
-                    ),
-                },
-            )
-            if appended < self.settings.retraining.min_new_samples:
-                fresh = build_production_dataset(
-                    n_rows=max(self.settings.retraining.min_new_samples, 1500),
-                    drift="none",
-                    seed=int(time.time()) % 10_000,
-                )
-                frames.append(fresh)
+                if target in available:
+                    observed = production[available]
+                    sources["labelled_production_rows"] = len(production)
 
-        combined = pd.concat(frames, ignore_index=True)
+        # Tables can overlap -- a new dataset version is often a full re-export
+        # that repeats the base rows -- so those are de-duplicated: by id where
+        # a row has one, otherwise by content. Production rows are separate
+        # events and are appended as they are; they carry no id, and treating
+        # every missing id as "the same id" would keep one row out of hundreds.
+        tables = pd.concat(frames, ignore_index=True)
+        before = len(tables)
+        id_column = data_config.id_column
+        if id_column and id_column in tables.columns:
+            has_id = tables[id_column].notna()
+            tables = pd.concat(
+                [
+                    tables[has_id].drop_duplicates(subset=[id_column], keep="last"),
+                    tables[~has_id],
+                ],
+                ignore_index=True,
+            )
+        tables = tables.drop_duplicates(keep="last")
+        sources["duplicates_dropped"] = before - len(tables)
+        # Keep what training consumes plus the identity columns, which every
+        # row -- base, new dataset or production -- now has.
+        keep = [c for c in columns if c in tables.columns]
         combined = (
-            combined.drop_duplicates(subset=[self.settings.data.id_column], keep="last")
-            if self.settings.data.id_column in combined.columns
-            else combined
+            tables[keep]
+            if observed is None
+            else pd.concat(
+                [tables[keep], observed[[c for c in keep if c in observed]]], ignore_index=True
+            )
         )
+        sources["rows"] = len(combined)
+        sources["new_rows"] = len(combined) - len(base_frame.drop_duplicates())
 
         record = registry.register_frame(
             combined,
-            filename=f"{self.settings.data.dataset_name}_retrain.csv",
-            description="retraining set: base training data + recent production data",
+            dataset_name=base_record.dataset_name,
+            parent_version=base_version.dataset_version,
+            filename=f"{model_name}_retrain.csv",
+            description=(
+                f"retraining set for {model_name}: {base_version.dataset_version} "
+                f"+ {sources['new_dataset_rows']} rows from {new_dataset_version or 'no new dataset'} "
+                f"+ {sources['labelled_production_rows']} labelled production rows"
+            ),
         )
+        sources["dataset_version"] = record.version
         logger.info(
             "retraining.dataset_ready",
-            extra={"dataset_version": record.version, "rows": record.n_rows},
+            extra={"model": model_name, **sources},
         )
-        return record.version
+        return record.version, sources
+
+    def _record_decision(
+        self,
+        model_name: str,
+        version: int,
+        decision: str,
+        reason: str,
+        approval: Any,
+        comparison: Any,
+        target_stage: ModelStage | None,
+    ) -> None:
+        current = self.registry.get(model_name, version)
+        get_gate_decisions().record(
+            model_name=model_name,
+            model_version=version,
+            source="pipeline",
+            decision=decision,
+            reason=reason,
+            approval=approval,
+            comparison=comparison,
+            thresholds=self.settings.approval.model_dump(mode="json"),
+            target_stage=target_stage.value if target_stage else None,
+            final_stage=current.stage.value,
+            actor="retraining",
+        )
+
+    def _hold_for_approval(
+        self,
+        event_id: str,
+        model_name: str,
+        candidate_version: int,
+        baseline_version: int | None,
+        trigger: RetrainingTrigger,
+        reason: str,
+        comparison: Any,
+        approval: Any,
+        detail: dict[str, Any],
+    ) -> RetrainingDecision:
+        """Every automated check passed; this environment needs a human to say yes."""
+        if not comparison.candidate_is_better:
+            return self._reject(
+                event_id,
+                model_name,
+                candidate_version,
+                baseline_version,
+                trigger,
+                reason,
+                comparison.reason,
+                comparison,
+                approval,
+                detail,
+                category="worse_than_production",
+            )
+        self.registry.update_status(model_name, candidate_version, "pending")
+        self._record_decision(
+            model_name,
+            candidate_version,
+            ApprovalDecision.PENDING_MANUAL.value,
+            "cleared every automated check and beat production; awaiting human approval",
+            approval,
+            comparison,
+            ModelStage.PRODUCTION,
+        )
+        self.store.update(
+            event_id,
+            status=RetrainingStatus.SUCCEEDED,
+            decision="awaiting_approval",
+            detail=detail,
+        )
+        message = (
+            f"candidate version {candidate_version} beat production on {comparison.metric} "
+            f"({comparison.improvement:+.4f}) and passed every automated check; it is held "
+            f"for approval: POST /api/v1/models/{model_name}/versions/{candidate_version}/approve"
+        )
+        get_alert_manager().raise_alert(
+            Severity.INFO,
+            AlertCategory.RETRAINING,
+            f"Retraining candidate for {model_name} awaits approval",
+            message,
+            context={
+                "event_id": event_id,
+                "model_name": model_name,
+                "candidate_version": candidate_version,
+            },
+        )
+        return RetrainingDecision(
+            event_id=event_id,
+            triggered=True,
+            trigger=trigger,
+            reason=reason,
+            status=RetrainingStatus.SUCCEEDED,
+            comparison=comparison,
+            approval=approval,
+            candidate_version=candidate_version,
+            deployed=False,
+            production_version=baseline_version,
+            message=message,
+        )
 
     def _reject(
         self,
@@ -481,6 +727,15 @@ class RetrainingPipeline:
     ) -> RetrainingDecision:
         """Keep the production model and archive the candidate with the reason."""
         self.registry.update_status(model_name, candidate_version, "rejected")
+        self._record_decision(
+            model_name,
+            candidate_version,
+            ApprovalDecision.REJECTED.value,
+            f"retraining candidate rejected ({category}): {rejection_reason}",
+            approval,
+            comparison,
+            None,
+        )
         self.registry.set_tags(
             model_name,
             candidate_version,
@@ -536,8 +791,14 @@ class RetrainingPipeline:
             ),
         )
 
-    def _fail(self, event_id: str, message: str, exc: Exception) -> None:
-        logger.error("retraining.failed", exc_info=exc, extra={"event_id": event_id})
+    def _fail(
+        self, event_id: str, message: str, exc: Exception, model_name: str | None = None
+    ) -> None:
+        logger.error(
+            "retraining.failed",
+            exc_info=exc,
+            extra={"event_id": event_id, "model": model_name},
+        )
         self.store.update(
             event_id,
             status=RetrainingStatus.FAILED,
@@ -547,11 +808,18 @@ class RetrainingPipeline:
         get_alert_manager().raise_alert(
             Severity.CRITICAL,
             AlertCategory.RETRAINING,
-            "Retraining run failed",
+            f"Retraining failed for {model_name}" if model_name else "Retraining run failed",
             message,
-            context={"event_id": event_id, "error": str(exc)},
+            context={"event_id": event_id, "model_name": model_name, "error": str(exc)},
         )
 
 
-def run_retraining(force: bool = False, deploy: bool | None = None) -> RetrainingDecision:
-    return RetrainingPipeline().run(force=force, deploy=deploy)
+def run_retraining(
+    force: bool = False,
+    deploy: bool | None = None,
+    model_name: str | None = None,
+    dataset_version: str | None = None,
+) -> RetrainingDecision:
+    return RetrainingPipeline().run(
+        force=force, deploy=deploy, model_name=model_name, dataset_version=dataset_version
+    )

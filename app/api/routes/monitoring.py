@@ -13,6 +13,7 @@ from app.monitoring.drift import recent_drift_reports
 from app.monitoring.metrics import render_metrics
 from app.monitoring.resource_monitor import latest_resources, sample_resources
 from app.monitoring.service import get_monitoring_service
+from app.registry.context import default_model_name
 from app.schemas.common import AlertCategory, Severity
 from app.schemas.evaluation import (
     Alert,
@@ -40,9 +41,14 @@ def metrics() -> Response:
     response_model=MonitoringSummary,
     summary="Monitoring summary",
 )
-def summary(window_minutes: int = Query(default=60, ge=1, le=10080)) -> MonitoringSummary:
-    """Everything the dashboard shows in one call."""
-    return get_monitoring_service().summary(window_minutes)
+def summary(
+    window_minutes: int = Query(default=60, ge=1, le=10080),
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
+) -> MonitoringSummary:
+    """Everything the monitoring view shows for one model, in one call."""
+    return get_monitoring_service().summary(window_minutes, model)
 
 
 @router.get(
@@ -50,8 +56,13 @@ def summary(window_minutes: int = Query(default=60, ge=1, le=10080)) -> Monitori
     response_model=ServiceMetrics,
     summary="Latency, throughput and error rate",
 )
-def service_metrics(window_minutes: int = Query(default=60, ge=1)) -> ServiceMetrics:
-    return get_monitoring_service().service_metrics(window_minutes)
+def service_metrics(
+    window_minutes: int = Query(default=60, ge=1),
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
+) -> ServiceMetrics:
+    return get_monitoring_service().service_metrics(window_minutes, model)
 
 
 @router.get(
@@ -59,13 +70,18 @@ def service_metrics(window_minutes: int = Query(default=60, ge=1)) -> ServiceMet
     response_model=LivePerformance,
     summary="Live model quality from labelled traffic",
 )
-def live_performance(model_version: int | None = None) -> LivePerformance:
+def live_performance(
+    model_version: int | None = None,
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
+) -> LivePerformance:
     """Production accuracy, computed only from labelled predictions.
 
     When no labels have been submitted this returns ``available=false`` with an
     explanation rather than an estimate.
     """
-    return get_monitoring_service().live_performance(model_version)
+    return get_monitoring_service().live_performance(model_version, model)
 
 
 @router.get(
@@ -87,17 +103,27 @@ def resources(
 
 
 @router.post("/api/v1/monitoring/watchdog", summary="Evaluate SLOs and raise alerts")
-def watchdog(window_minutes: int = Query(default=15, ge=1)) -> dict[str, Any]:
-    return get_monitoring_service().health_watchdog(window_minutes)
+def watchdog(
+    window_minutes: int = Query(default=15, ge=1),
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
+) -> dict[str, Any]:
+    return get_monitoring_service().health_watchdog(window_minutes, model)
 
 
 # --------------------------------------------------------------------------- #
 # Drift
 # --------------------------------------------------------------------------- #
 @router.get("/api/v1/drift", summary="Recent drift reports")
-def list_drift(limit: int = Query(default=20, le=100)) -> dict[str, Any]:
+def list_drift(
+    limit: int = Query(default=20, le=100),
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
+) -> dict[str, Any]:
     settings = get_settings()
-    reports = recent_drift_reports(settings.tracking.registered_model_name, limit)
+    reports = recent_drift_reports(model or default_model_name(settings), limit)
     return {
         "count": len(reports),
         "threshold": settings.drift.threshold,
@@ -107,9 +133,13 @@ def list_drift(limit: int = Query(default=20, le=100)) -> dict[str, Any]:
 
 
 @router.get("/api/v1/drift/latest", summary="Most recent drift report")
-def latest_drift() -> dict[str, Any]:
+def latest_drift(
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
+) -> dict[str, Any]:
     settings = get_settings()
-    reports = recent_drift_reports(settings.tracking.registered_model_name, 1)
+    reports = recent_drift_reports(model or default_model_name(settings), 1)
     if not reports:
         return {
             "found": False,
@@ -122,6 +152,9 @@ def latest_drift() -> dict[str, Any]:
 def scan_drift(
     model_version: int | None = None,
     persist: bool = Query(default=True),
+    model: str | None = Query(
+        default=None, description="Model name; defaults to the configured reference model."
+    ),
 ) -> DriftReport:
     """Compare recent production traffic against the training reference window.
 
@@ -129,7 +162,9 @@ def scan_drift(
     when ground-truth labels are available; otherwise its status is
     ``unavailable`` and prediction drift is offered as a proxy signal.
     """
-    return get_monitoring_service().run_drift_scan(model_version, persist=persist)
+    return get_monitoring_service().run_drift_scan(
+        model_version, persist=persist, model_name=model
+    )
 
 
 # --------------------------------------------------------------------------- #

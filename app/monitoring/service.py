@@ -27,6 +27,7 @@ from app.monitoring.inference_log import get_inference_log
 from app.monitoring.metrics import set_live_performance
 from app.monitoring.resource_monitor import latest_resources
 from app.registry.base import ModelRegistry
+from app.registry.context import data_config_for, default_model_name, endpoint_for
 from app.registry.factory import get_registry
 from app.schemas.evaluation import (
     DriftReport,
@@ -55,81 +56,96 @@ class MonitoringService:
         return self._registry
 
     # -- windows ------------------------------------------------------------- #
-    def reference_window(self, model_version: int | None = None) -> pd.DataFrame:
-        """The training data the serving model was fitted on.
+    def _name(self, model_name: str | None) -> str:
+        return model_name or default_model_name(self.settings)
 
-        Falls back to the latest registered dataset when the model's own dataset
-        version is no longer resolvable, and says so in the log -- a drift
-        comparison against the wrong reference is worse than none.
+    def reference_window(
+        self, model_version: int | None = None, model_name: str | None = None
+    ) -> pd.DataFrame:
+        """The training data the serving version was fitted on -- and nothing else.
+
+        There is deliberately no fallback. Comparing production traffic with
+        some other dataset produces a number that looks like a drift score and
+        means nothing, which is worse than reporting that the reference is gone.
         """
-        model_name = self.settings.tracking.registered_model_name
-        datasets = get_dataset_registry()
-
-        version = None
+        model_name = self._name(model_name)
         if model_version is not None:
-            version = self.registry.get(model_name, model_version).dataset_version
+            version_record = self.registry.get(model_name, model_version)
         else:
-            serving = self.registry.get_serving(model_name)
-            version = serving.dataset_version if serving else None
-
-        if version:
-            try:
-                return datasets.load(version)
-            except Exception as exc:
-                logger.warning(
-                    "monitoring.reference_dataset_unavailable",
-                    extra={
-                        "dataset_version": version,
-                        "error": str(exc),
-                        "fallback": "latest registered dataset",
-                    },
-                )
-
-        latest = datasets.latest()
-        if latest is None:
-            return pd.DataFrame()
-        return datasets.load(latest.version)
+            version_record = self.registry.get_serving(model_name)
+        dataset_version = version_record.dataset_version if version_record else None
+        if not dataset_version:
+            raise InsufficientDataError(
+                f"{model_name} has no serving version with a recorded training dataset, "
+                "so there is no reference to compare production traffic against",
+                model=model_name,
+            )
+        try:
+            return get_dataset_registry().load(dataset_version)
+        except Exception as exc:
+            raise InsufficientDataError(
+                f"the training dataset {dataset_version} of {model_name} "
+                f"v{version_record.version} is no longer available ({exc}); drift cannot be "
+                "measured against a substitute",
+                model=model_name,
+                dataset_version=dataset_version,
+            ) from exc
 
     def current_window(
-        self, model_version: int | None = None, limit: int | None = None
+        self,
+        model_version: int | None = None,
+        limit: int | None = None,
+        model_name: str | None = None,
     ) -> pd.DataFrame:
         log = get_inference_log()
         return log.feature_frame(
-            model_name=self.settings.tracking.registered_model_name,
+            model_name=self._name(model_name),
             model_version=model_version,
             limit=limit or self.settings.drift.detection_window,
         )
 
     # -- drift ---------------------------------------------------------------- #
     def run_drift_scan(
-        self, model_version: int | None = None, persist: bool = True
+        self,
+        model_version: int | None = None,
+        persist: bool = True,
+        model_name: str | None = None,
     ) -> DriftReport:
-        model_name = self.settings.tracking.registered_model_name
+        model_name = self._name(model_name)
         serving = self.registry.get_serving(model_name)
         version = model_version or (serving.version if serving else None)
-
-        current = self.current_window(version)
-        if current.empty:
+        if version is None:
             raise InsufficientDataError(
-                "no production predictions have been logged yet; send traffic to "
-                "/api/v1/predict (or run 'make simulate-traffic') before scanning "
-                "for drift",
+                f"{model_name} has no version in Staging or Production, so nothing is "
+                "serving and there is no traffic to scan",
                 model=model_name,
             )
 
-        reference = self.reference_window(version)
+        current = self.current_window(version, model_name=model_name)
+        if current.empty:
+            raise InsufficientDataError(
+                f"no production predictions have been logged for {model_name} v{version} "
+                f"yet; send traffic to POST /api/v1/models/{model_name}/predict before "
+                "scanning for drift",
+                model=model_name,
+            )
+
+        reference = self.reference_window(version, model_name)
         reference = reference.head(self.settings.drift.reference_window)
 
         # Reference probabilities let prediction drift be measured. They come
         # from scoring the reference sample with the serving model.
-        reference = self._add_reference_predictions(reference, version)
+        reference = self._add_reference_predictions(reference, version, model_name)
 
         labelled = get_inference_log().labelled_frame(model_name, version)
         baseline = None
         if serving is not None:
             baseline = serving.metrics.get("roc_auc")
 
-        detector = DriftDetector(self.settings)
+        # The detector compares the features this version was trained on, not
+        # the configured reference model's.
+        data_config = data_config_for(self.registry.get(model_name, version), self.settings)
+        detector = DriftDetector(self.settings.model_copy(update={"data": data_config}))
         return detector.detect(
             reference=reference,
             current=current,
@@ -141,7 +157,7 @@ class MonitoringService:
         )
 
     def _add_reference_predictions(
-        self, reference: pd.DataFrame, version: int | None
+        self, reference: pd.DataFrame, version: int | None, model_name: str | None = None
     ) -> pd.DataFrame:
         if reference.empty or version is None or "_probability" in reference.columns:
             return reference
@@ -149,9 +165,9 @@ class MonitoringService:
             from app.api.serving import get_prediction_service
             from app.data.preprocessing import prepare_inference_frame
 
-            model, _ = get_prediction_service().resolve_model(version)
+            model, _ = get_prediction_service().resolve_model(version, self._name(model_name))
             sample = reference.head(2000)
-            frame = prepare_inference_frame(sample, self.settings.data)
+            frame = prepare_inference_frame(sample, model.data_config or self.settings.data)
             probabilities = model.pipeline.predict_proba(frame)[:, 1]
             enriched = sample.copy()
             enriched["_probability"] = probabilities
@@ -162,13 +178,15 @@ class MonitoringService:
             return reference
 
     # -- performance ---------------------------------------------------------- #
-    def live_performance(self, model_version: int | None = None) -> LivePerformance:
+    def live_performance(
+        self, model_version: int | None = None, model_name: str | None = None
+    ) -> LivePerformance:
         """Model quality from labelled production traffic only.
 
         Returns ``available=False`` with an explanation when no labels exist.
         The platform never estimates production accuracy from unlabelled data.
         """
-        model_name = self.settings.tracking.registered_model_name
+        model_name = self._name(model_name)
         # Live quality reads three columns; the feature payload is not one of
         # them, so do not pay to deserialise it.
         labelled = get_inference_log().labelled_frame(
@@ -244,9 +262,11 @@ class MonitoringService:
             )
         return result
 
-    def service_metrics(self, window_minutes: int = 60) -> ServiceMetrics:
+    def service_metrics(
+        self, window_minutes: int = 60, model_name: str | None = None
+    ) -> ServiceMetrics:
         stats = get_inference_log().window_stats(
-            model_name=self.settings.tracking.registered_model_name,
+            model_name=self._name(model_name),
             minutes=window_minutes,
         )
         monitoring = self.settings.monitoring
@@ -273,8 +293,10 @@ class MonitoringService:
         )
 
     # -- summary --------------------------------------------------------------- #
-    def summary(self, window_minutes: int = 60) -> MonitoringSummary:
-        model_name = self.settings.tracking.registered_model_name
+    def summary(
+        self, window_minutes: int = 60, model_name: str | None = None
+    ) -> MonitoringSummary:
+        model_name = self._name(model_name)
         serving = self.registry.get_serving(model_name)
         version = serving.version if serving else None
 
@@ -283,15 +305,17 @@ class MonitoringService:
             model_name=model_name,
             model_version=version,
             model_stage=serving.stage.value if serving else None,
-            service=self.service_metrics(window_minutes),
+            service=self.service_metrics(window_minutes, model_name),
             resources=latest_resources(),
-            live_performance=self.live_performance(version),
+            live_performance=self.live_performance(version, model_name),
             prediction_positive_rate=stats.get("positive_rate"),
             latest_drift=latest_drift_report(model_name),
             open_alerts=get_alert_manager().open_count(),
         )
 
-    def health_watchdog(self, window_minutes: int = 15) -> dict[str, Any]:
+    def health_watchdog(
+        self, window_minutes: int = 15, model_name: str | None = None
+    ) -> dict[str, Any]:
         """Check live SLOs and raise alerts (and optionally roll back).
 
         This is what makes "production health deteriorates -> rollback" real
@@ -300,7 +324,9 @@ class MonitoringService:
         """
         from app.schemas.common import AlertCategory, Severity
 
-        metrics = self.service_metrics(window_minutes)
+        model_name = self._name(model_name)
+        endpoint = endpoint_for(model_name, self.settings)
+        metrics = self.service_metrics(window_minutes, model_name)
         alerts = get_alert_manager()
         breaches: list[str] = []
 
@@ -317,13 +343,14 @@ class MonitoringService:
             alerts.raise_alert(
                 Severity.CRITICAL,
                 AlertCategory.ERROR_RATE,
-                f"Error-rate SLO breached on {self.settings.deployment.endpoint_name}",
+                f"Error-rate SLO breached on {endpoint}",
                 (
                     f"Error rate {metrics.error_rate:.2%} over {metrics.request_count} "
                     f"requests exceeds the SLO of {metrics.slo_error_rate:.2%}."
                 ),
                 context={
-                    "endpoint": self.settings.deployment.endpoint_name,
+                    "endpoint": endpoint,
+                    "model": model_name,
                     "error_rate": metrics.error_rate,
                     "slo": metrics.slo_error_rate,
                     "requests": metrics.request_count,
@@ -336,13 +363,14 @@ class MonitoringService:
             alerts.raise_alert(
                 Severity.WARNING,
                 AlertCategory.LATENCY,
-                f"Latency SLO breached on {self.settings.deployment.endpoint_name}",
+                f"Latency SLO breached on {endpoint}",
                 (
                     f"p95 latency {metrics.latency.p95_ms:.1f}ms exceeds the SLO of "
                     f"{metrics.slo_latency_ms:.1f}ms over {metrics.request_count} requests."
                 ),
                 context={
-                    "endpoint": self.settings.deployment.endpoint_name,
+                    "endpoint": endpoint,
+                    "model": model_name,
                     "latency_p95_ms": metrics.latency.p95_ms,
                     "slo": metrics.slo_latency_ms,
                 },
@@ -356,8 +384,10 @@ class MonitoringService:
             "metrics": metrics.model_dump(mode="json"),
         }
 
-    def deployment_snapshot(self) -> dict[str, Any]:
-        deployment = get_deployment_store().active(self.settings.deployment.endpoint_name)
+    def deployment_snapshot(self, model_name: str | None = None) -> dict[str, Any]:
+        deployment = get_deployment_store().active(
+            endpoint_for(self._name(model_name), self.settings)
+        )
         if deployment is None:
             return {"active": False}
         return {

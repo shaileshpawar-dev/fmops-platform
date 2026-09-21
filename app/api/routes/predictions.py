@@ -31,7 +31,11 @@ def _request_id(request: Request) -> str:
 
 @router.post("/predict", response_model=PredictionResponse, summary="Score one application")
 def predict(payload: PredictionRequest, request: Request) -> PredictionResponse:
-    """Score a single loan application.
+    """Score a single loan application with the reference model.
+
+    The typed contract for the bundled reference model. Every model -- this one
+    included -- is also served at ``POST /api/v1/models/{name}/predict``, which
+    checks the request against that model's own recorded signature.
 
     The response carries the model version and variant that actually served the
     request, so a canary or shadow rollout is visible per response rather than
@@ -103,15 +107,33 @@ def feedback(payload: FeedbackRequest) -> FeedbackResponse:
 
     This is the only route by which the platform can compute *live* model
     quality or measure concept drift; without labels both are reported as
-    unavailable rather than estimated.
+    unavailable rather than estimated. The label may be 0/1 or the model's own
+    class name; a request id the platform never served is refused (404), and a
+    second label for the same request replaces the first.
     """
-    log = get_inference_log()
-    total = log.record_feedback(payload.request_id, payload.actual_label, payload.source)
-    return FeedbackResponse(request_id=payload.request_id, recorded=True, labelled_total=total)
+    result = get_inference_log().record_feedback(
+        payload.request_id, payload.actual_label, payload.source
+    )
+    return FeedbackResponse(
+        request_id=payload.request_id,
+        recorded=True,
+        labelled_total=result["labelled_total"],
+        model_name=result["model_name"],
+        model_version=result["model_version"],
+        actual_label=result["actual_label"],
+        replaced_previous=result["replaced_previous"],
+    )
 
 
 @router.get("/predictions/recent", summary="Recent predictions")
-def recent_predictions(limit: int = 50, include_shadow: bool = False) -> dict[str, Any]:
+def recent_predictions(
+    limit: int = 50, include_shadow: bool = False, model_name: str | None = None
+) -> dict[str, Any]:
     log = get_inference_log()
-    rows = log.recent(limit=min(limit, 500), include_shadow=include_shadow, only_ok=False)
+    rows = log.recent(
+        model_name=model_name,
+        limit=min(limit, 500),
+        include_shadow=include_shadow,
+        only_ok=False,
+    )
     return {"count": len(rows), "predictions": rows}

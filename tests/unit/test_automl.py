@@ -293,14 +293,13 @@ def test_run_settings_never_list_a_column_the_splitter_drops(settings):
     ColumnTransformer asks for a column that is no longer in the frame and
     every candidate dies at fit time.
     """
-    from app.automl.runner import build_run_settings
+    from app.data.contract import contract_for_target
 
     frame = _binary_frame(300)
     frame["opened_at"] = pd.date_range("2024-01-01", periods=300).astype(str)
     profile = profile_frame(frame, target_override="churn")
-    features = [c.name for c in profile.columns if c.role == "feature"]
 
-    run_settings = build_run_settings(profile, "churn", features)
+    run_settings = contract_for_target(frame, "churn", profile=profile)
     data = run_settings.data
     listed = set(data.numeric_features) | set(data.categorical_features)
     dropped = {data.target_column, data.id_column, data.timestamp_column}
@@ -310,9 +309,10 @@ def test_run_settings_never_list_a_column_the_splitter_drops(settings):
 
 
 def test_run_settings_do_not_mutate_the_global_configuration(settings):
-    from app.automl.runner import build_run_settings
+    from app.data.contract import contract_for_target
 
     before = settings.data.target_column
-    profile = profile_frame(_binary_frame(200))
-    build_run_settings(profile, "churn", ["age", "income", "segment"])
+    before_features = list(settings.data.feature_columns)
+    contract_for_target(_binary_frame(200), "churn", settings=settings)
     assert settings.data.target_column == before
+    assert settings.data.feature_columns == before_features

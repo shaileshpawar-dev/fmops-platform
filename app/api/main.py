@@ -24,6 +24,7 @@ from app.api.routes import (
     deployments,
     experiments,
     health,
+    jobs,
     llm,
     models,
     monitoring,
@@ -85,16 +86,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     get_database()  # create/migrate the schema before serving
 
-    # Background training tasks do not survive a restart. Any run still
-    # marked in flight belongs to a process that is gone, so retire it rather
-    # than showing progress that nothing is making.
-    from app.training.jobs import get_training_run_store
+    # Jobs: fail work whose worker is gone (by heartbeat, so a sibling worker
+    # process's live jobs are untouched), retire records no job owns, then
+    # start this process's worker and heartbeat threads.
+    from app.jobs.handlers import reconcile_unowned
+    from app.jobs.runner import get_job_runner
 
-    get_training_run_store().reconcile_orphans()
-
-    from app.automl.runner import get_automl_store
-
-    get_automl_store().reconcile_orphans()
+    runner = get_job_runner()
+    reconcile_unowned()
+    runner.start()
 
     _restore_serving_state(settings)
     _warm_models(settings)
@@ -106,6 +106,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    runner.stop()
     if settings.monitoring.metrics_enabled:
         from app.monitoring.resource_monitor import get_resource_monitor
 
@@ -114,7 +115,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _warm_models(settings: Settings) -> None:
-    """Run a throwaway prediction through every routed version.
+    """Run a throwaway prediction through every routed version of every model.
 
     Keeps first-request latency off the SLO. Never fatal.
     """
@@ -124,26 +125,45 @@ def _warm_models(settings: Settings) -> None:
 
         if settings.deployment.provider != "local":
             return
-        routing = get_local_provider().routing(settings.deployment.endpoint_name)
-        if routing is None:
-            return
+        provider = get_local_provider()
         cache = get_model_cache()
-        for version in routing.versions:
-            cache.warm(cache.get(routing.model_name, version))
+        for endpoint in _known_endpoints(settings):
+            routing = provider.routing(endpoint)
+            if routing is None:
+                continue
+            for version in routing.versions:
+                cache.warm(cache.get(routing.model_name, version))
     except Exception as exc:
         logger.warning("api.model_warmup_failed", extra={"error": str(exc)})
 
 
-def _restore_serving_state(settings: Settings) -> None:
-    """Re-apply the last known routing so a restart keeps serving.
+def _known_endpoints(settings: Settings) -> list[str]:
+    """Every endpoint that has a deployment, plus every model's own endpoint."""
+    from app.core.db import get_database
+    from app.registry.context import endpoint_for
+    from app.registry.factory import get_registry
 
-    Without this, a container restart would leave the endpoint unrouted until
-    someone re-deployed, even though the registry and the deployment record both
-    know exactly what should be live.
+    endpoints = {
+        row["endpoint_name"]
+        for row in get_database().query("SELECT DISTINCT endpoint_name FROM deployments")
+    }
+    endpoints |= {endpoint_for(m["name"], settings) for m in get_registry().list_models()}
+    return sorted(endpoints)
+
+
+def _restore_serving_state(settings: Settings) -> None:
+    """Re-apply the last known routing of every model, so a restart keeps serving.
+
+    Without this, a container restart would leave endpoints unrouted until
+    someone re-deployed, even though the registry and the deployment records
+    both know exactly what should be live. A model that was never deployed but
+    has a Production or Staging version is routed from the registry, so a
+    freshly promoted model is servable without a deployment step.
     """
     try:
         from app.deployment.base import get_deployment_store
         from app.deployment.local_provider import get_local_provider
+        from app.registry.context import endpoint_for
         from app.registry.factory import get_registry
         from app.schemas.deployment import TrafficSplit
 
@@ -151,57 +171,71 @@ def _restore_serving_state(settings: Settings) -> None:
             return
 
         store = get_deployment_store()
-        deployment = store.active(settings.deployment.endpoint_name)
         provider = get_local_provider()
+        registry = get_registry()
+        routed: set[str] = set()
 
-        if deployment is not None and deployment.traffic:
-            provider.apply(
-                deployment.endpoint_name,
-                deployment.model_name,
-                deployment.traffic_split(),
-                shadow_version=deployment.shadow_version,
-            )
-            logger.info(
-                "api.routing_restored",
-                extra={
-                    "endpoint": deployment.endpoint_name,
-                    "traffic": deployment.traffic,
-                    "shadow_version": deployment.shadow_version,
-                },
-            )
-            return
+        for endpoint in _known_endpoints(settings):
+            deployment = store.active(endpoint)
+            if deployment is None or not deployment.traffic:
+                continue
+            try:
+                provider.apply(
+                    deployment.endpoint_name,
+                    deployment.model_name,
+                    deployment.traffic_split(),
+                    shadow_version=deployment.shadow_version,
+                )
+                routed.add(deployment.model_name)
+                logger.info(
+                    "api.routing_restored",
+                    extra={
+                        "endpoint": deployment.endpoint_name,
+                        "model": deployment.model_name,
+                        "traffic": deployment.traffic,
+                    },
+                )
+            except Exception as exc:  # one broken model must not unroute the rest
+                logger.error(
+                    "api.routing_restore_failed",
+                    extra={"endpoint": endpoint, "error": str(exc)},
+                )
 
-        model_name = settings.tracking.registered_model_name
-        serving = get_registry().get_serving(model_name)
-        if serving is not None:
-            provider.apply(
-                settings.deployment.endpoint_name,
-                model_name,
-                TrafficSplit.all_to(serving.version),
-            )
+        for model in registry.list_models():
+            name = model["name"]
+            if name in routed:
+                continue
+            serving = registry.get_serving(name)
+            if serving is None:
+                continue
+            try:
+                provider.apply(
+                    endpoint_for(name, settings), name, TrafficSplit.all_to(serving.version)
+                )
+                logger.info(
+                    "api.routing_bootstrapped_from_registry",
+                    extra={
+                        "model": name,
+                        "version": serving.version,
+                        "stage": serving.stage.value,
+                    },
+                )
+            except Exception as exc:
+                logger.error(
+                    "api.routing_bootstrap_failed", extra={"model": name, "error": str(exc)}
+                )
+
+        if not registry.list_models():
             logger.info(
-                "api.routing_bootstrapped_from_registry",
-                extra={
-                    "model": model_name,
-                    "version": serving.version,
-                    "stage": serving.stage.value,
-                },
-            )
-        else:
-            logger.warning(
-                "api.no_model_available",
-                extra={
-                    "model": model_name,
-                    "impact": "/api/v1/predict will return 503 until a model is promoted",
-                    "fix": "run 'make demo' or 'make train && make promote'",
-                },
+                "api.no_models_registered",
+                extra={"detail": "upload a dataset and train a model to start serving"},
             )
     except Exception as exc:
-        # Startup must not crash because a model could not be warmed; readiness
-        # will report the endpoint as not ready instead.
+        # Startup must not crash because routing could not be restored; the
+        # affected endpoints report themselves as unrouted instead.
         logger.error(
             "api.routing_restore_failed",
-            extra={"error": str(exc), "impact": "endpoint starts unrouted"},
+            extra={"error": str(exc), "impact": "endpoints start unrouted"},
         )
 
 
@@ -300,6 +334,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(retraining.router)
     app.include_router(automl.router)
     app.include_router(training.router)
+    app.include_router(jobs.router)
+    app.include_router(jobs.automation_router)
     app.include_router(llm.router)
 
     # The console is a handful of static assets rather than one giant inlined

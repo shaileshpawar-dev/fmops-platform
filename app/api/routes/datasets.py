@@ -21,7 +21,6 @@ import pandas as pd
 from fastapi import APIRouter, Query, Request
 
 from app.core.audit import audit
-from app.core.config import get_settings
 from app.core.exceptions import DatasetNotFoundError, FMOpsError
 from app.core.logging import get_logger
 
@@ -129,8 +128,9 @@ async def upload_dataset(
     if frame.empty or not len(frame.columns):
         raise DatasetUploadError("the CSV parsed to zero rows or zero columns")
 
-    settings = get_settings()
-    name = (dataset_name or settings.data.dataset_name).strip() or settings.data.dataset_name
+    # Named after the file unless the caller names it. Defaulting to the
+    # reference dataset's name labelled every upload as the loan dataset.
+    name = (dataset_name or _safe_stem(filename) or "uploaded").strip() or "uploaded"
 
     from app.data.versioning import get_dataset_registry
 
@@ -197,18 +197,33 @@ def dataset_limits() -> dict[str, Any]:
 
 
 @router.get("/{version}/validation", summary="Validate one dataset version")
-def dataset_validation(version: str) -> dict[str, Any]:
+def dataset_validation(
+    version: str,
+    target: Annotated[
+        str | None,
+        Query(description="Also check the rules training enforces on this target."),
+    ] = None,
+) -> dict[str, Any]:
     """Run the platform's validation engine over a registered version.
 
-    Uses the same engine and the same expectations the training pipeline gates
-    on, so a dataset that passes here is one the pipeline will accept.
+    The dataset is checked under its own contract: the reference dataset
+    against its declared schema, anything else against its own columns. With a
+    ``target`` the binary-label checks training applies are included, so a
+    dataset that passes here with a target is one training will accept.
     """
     from app.data.versioning import get_dataset_registry
 
     registry = get_dataset_registry()
     registry.get(version)  # raises DatasetNotFoundError if unknown
     frame = registry.load(version)
-    return _validation_summary(frame, version)
+    return _validation_summary(frame, version, target)
+
+
+@router.get("/{version}/lineage", summary="Models trained on a dataset, and what it fed")
+def dataset_lineage(version: str) -> dict[str, Any]:
+    from app.registry.lineage import dataset_lineage as lineage
+
+    return lineage(version)
 
 
 @router.get("/{version}/preview", summary="Preview rows and column profile")
@@ -255,15 +270,17 @@ def dataset_preview(
     }
 
 
-def _validation_summary(frame: pd.DataFrame, version: str | None) -> dict[str, Any]:
+def _validation_summary(
+    frame: pd.DataFrame, version: str | None, target: str | None = None
+) -> dict[str, Any]:
     """Shape the existing validation report for the API.
 
     The engine owns every rule; this only selects fields and truncates the
     failure list so one badly broken dataset cannot return a megabyte of JSON.
     """
-    from app.data.validation import validate_dataframe
+    from app.data.validation import validate_dataset
 
-    report = validate_dataframe(frame, dataset_version=version)
+    report = validate_dataset(frame, dataset_version=version, target=target)
     results = list(report.results)
     failed = [r for r in results if not r.success]
     return {

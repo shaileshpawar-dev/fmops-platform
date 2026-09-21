@@ -9,7 +9,7 @@ candidate was promoted or rejected.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -85,6 +85,10 @@ class ModelComparison(BaseModel):
     candidate_is_better: bool
     decision: str
     reason: str = ""
+    # What the two scores were measured on. "shared_holdout" is the fair
+    # comparison: both models scored on the same rows neither trained on.
+    basis: Literal["shared_holdout", "recorded_metrics", "no_incumbent"] = "recorded_metrics"
+    holdout_rows: int | None = None
     created_at: str = Field(default_factory=utcnow_iso)
 
 

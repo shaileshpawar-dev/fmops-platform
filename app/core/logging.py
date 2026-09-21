@@ -214,6 +214,10 @@ def configure_logging(
     root = logging.getLogger()
     for existing in list(root.handlers):
         root.removeHandler(existing)
+    # The console threshold lives on the console handler, not only on the root
+    # logger, so other handlers (per-job log capture) can see records below it
+    # without those records reaching stdout.
+    handler.setLevel(level.upper())
     root.addHandler(handler)
     root.setLevel(level.upper())
 

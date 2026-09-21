@@ -275,12 +275,11 @@ def approve_and_compare(
         drift_score=drift_score,
         settings=settings,
     )
-    production = registry.get_production(model_name)
-    comparison = compare_to_production(
-        evaluation.metrics,
-        production.metrics if production else None,
-        candidate_version=model_version,
-        baseline_version=production.version if production else None,
+    from app.training.holdout import compare_on_shared_holdout
+
+    comparison = compare_on_shared_holdout(
+        registry.get(model_name, model_version),
+        registry.get_production(model_name),
         settings=settings,
     )
     return approval, comparison

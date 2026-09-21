@@ -31,6 +31,7 @@ from app.deployment.rollback import RollbackManager
 from app.deployment.shadow import ShadowStrategy
 from app.deployment.strategy import HealthProbe, Strategy, StrategyContext
 from app.registry.base import ModelRegistry
+from app.registry.context import default_model_name, endpoint_for, signature_of
 from app.registry.factory import get_registry
 from app.schemas.common import DeploymentState, DeploymentStrategy, ModelStage
 from app.schemas.deployment import (
@@ -50,8 +51,18 @@ STRATEGIES: dict[DeploymentStrategy, type[Strategy]] = {
     DeploymentStrategy.DIRECT: DirectStrategy,
 }
 
-# Stages whose versions may be deployed without forcing.
-DEPLOYABLE_STAGES = (ModelStage.STAGING, ModelStage.PRODUCTION, ModelStage.VALIDATION)
+# Stages whose versions may be deployed. Only the approval gate (the end of a
+# training run, or /approve) moves a version into either, so "deployable" means
+# "the gate said yes". Validation is deliberately absent: it is reachable
+# without the gate, and a successful deploy walks the version to Production.
+DEPLOYABLE_STAGES = (ModelStage.STAGING, ModelStage.PRODUCTION)
+
+
+class DeploymentRefusedError(DeploymentError):
+    """The request cannot be deployed as asked; nothing was changed."""
+
+    code = "deployment_refused"
+    http_status = 409
 
 
 def build_provider(settings: Settings | None = None) -> DeploymentProvider:
@@ -73,6 +84,10 @@ def build_provider(settings: Settings | None = None) -> DeploymentProvider:
 
         return SageMakerDeploymentProvider(settings)
     return get_local_provider()
+
+
+def default_endpoint(settings: Settings) -> str:
+    return endpoint_for(default_model_name(settings), settings)
 
 
 class DeploymentManager:
@@ -101,19 +116,73 @@ class DeploymentManager:
         return self._probe
 
     # -- deploy -------------------------------------------------------------- #
+    def validate_request(
+        self, request: DeploymentRequest, force: bool = False
+    ) -> tuple[str, str, DeploymentStrategy]:
+        """Everything that can refuse a deployment, checked without side effects.
+
+        The API calls this before queueing a deployment job, so a request that
+        would be refused is refused immediately, not minutes later in a job.
+        """
+        model_name = request.model_name or default_model_name(self.settings)
+        endpoint = endpoint_for(model_name, self.settings)
+        if request.endpoint_name and request.endpoint_name != endpoint:
+            # An endpoint belongs to one model. Deploying another model onto it
+            # would silently change what its callers are scored by.
+            raise DeploymentRefusedError(
+                f"endpoint {request.endpoint_name!r} does not belong to {model_name}; "
+                f"its endpoint is {endpoint!r}",
+                model=model_name,
+            )
+        strategy_kind = request.strategy or DeploymentStrategy(
+            self.settings.deployment.strategy
+        )
+        candidate = self._validate_candidate(model_name, request.model_version, force)
+        active = self.store.active(endpoint)
+        current_version = active.current_version if active else None
+        if strategy_kind in (DeploymentStrategy.CANARY, DeploymentStrategy.SHADOW) and (
+            current_version is not None and current_version != candidate.version
+        ):
+            self._check_contracts_match(model_name, current_version, candidate.version)
+        return model_name, endpoint, strategy_kind
+
+    def _check_contracts_match(self, model_name: str, live: int, candidate: int) -> None:
+        """Canary and shadow send one request to two versions.
+
+        That only works when both accept the same input. A version with a
+        different feature set would fail on its share of traffic (canary) or on
+        every mirrored request (shadow) -- which reads as a bad model when the
+        real problem is a bad rollout. Such a change needs a full switch.
+        """
+        live_sig = signature_of(self.registry.get(model_name, live))
+        cand_sig = signature_of(self.registry.get(model_name, candidate))
+        if live_sig is None or cand_sig is None:
+            return
+        if set(live_sig.feature_columns) != set(cand_sig.feature_columns):
+            added = sorted(set(cand_sig.feature_columns) - set(live_sig.feature_columns))
+            removed = sorted(set(live_sig.feature_columns) - set(cand_sig.feature_columns))
+            raise DeploymentRefusedError(
+                f"v{candidate} and the live v{live} take different inputs "
+                f"(added: {', '.join(added) or 'none'}; removed: {', '.join(removed) or 'none'}), "
+                "so they cannot share traffic; deploy it with blue_green or direct",
+                model=model_name,
+            )
+
     def deploy(
         self,
         request: DeploymentRequest,
         force: bool = False,
         actor: str = "system",
+        sleep: Any = None,
+        on_created: Any = None,
     ) -> DeploymentResult:
-        model_name = request.model_name or self.settings.tracking.registered_model_name
-        endpoint = request.endpoint_name or self.settings.deployment.endpoint_name
-        strategy_kind = request.strategy or DeploymentStrategy(
-            self.settings.deployment.strategy
-        )
+        """Put a version into service.
 
-        candidate = self._validate_candidate(model_name, request.model_version, force)
+        ``sleep`` replaces the canary's wait between steps; the job runner
+        passes one that wakes to honour cancellation.
+        """
+        model_name, endpoint, strategy_kind = self.validate_request(request, force)
+        candidate = self.registry.get(model_name, request.model_version)
         active = self.store.active(endpoint)
         current_version = active.current_version if active else None
 
@@ -137,7 +206,12 @@ class DeploymentManager:
             },
         )
 
-        strategy = STRATEGIES[strategy_kind](self.settings)
+        if on_created is not None:
+            on_created(deployment.id)
+        if strategy_kind == DeploymentStrategy.CANARY and sleep is not None:
+            strategy: Strategy = CanaryStrategy(self.settings, sleep=sleep)
+        else:
+            strategy = STRATEGIES[strategy_kind](self.settings)
         ctx = StrategyContext(
             deployment=deployment,
             provider=self.provider,
@@ -214,12 +288,12 @@ class DeploymentManager:
                     },
                 )
             return candidate
-        raise DeploymentError(
+        raise DeploymentRefusedError(
             f"model {model_name} v{version} is in stage {candidate.stage.value} and "
             f"status {candidate.status.value}; only "
             f"{', '.join(s.value for s in DEPLOYABLE_STAGES)} versions may be "
-            "deployed. Promote it through the approval gate first, or pass "
-            "force=true to override (this is recorded in the audit log).",
+            "deployed. A version reaches those stages only through the approval gate "
+            f"(POST /api/v1/models/{model_name}/versions/{version}/approve).",
             model=model_name,
             version=version,
             stage=candidate.stage.value,
@@ -261,24 +335,20 @@ class DeploymentManager:
 
     # -- inspection ---------------------------------------------------------- #
     def status(self, endpoint_name: str | None = None) -> Deployment | None:
-        endpoint = endpoint_name or self.settings.deployment.endpoint_name
+        endpoint = endpoint_name or default_endpoint(self.settings)
         return self.store.active(endpoint) or self.store.latest(endpoint)
 
     def list(self, endpoint_name: str | None = None, limit: int = 50) -> list[Deployment]:
         return self.store.list(endpoint_name, limit)
 
     def health(self, endpoint_name: str | None = None) -> EndpointHealth:
-        endpoint = endpoint_name or self.settings.deployment.endpoint_name
+        endpoint = endpoint_name or default_endpoint(self.settings)
         deployment = self.status(endpoint)
-        model_name = (
-            deployment.model_name
-            if deployment
-            else self.settings.tracking.registered_model_name
-        )
+        model_name = deployment.model_name if deployment else default_model_name(self.settings)
         return self.provider.health_check(endpoint, model_name)
 
     def provider_status(self, endpoint_name: str | None = None) -> dict[str, Any]:
-        endpoint = endpoint_name or self.settings.deployment.endpoint_name
+        endpoint = endpoint_name or default_endpoint(self.settings)
         return self.provider.status(endpoint)
 
     # -- rollback ------------------------------------------------------------ #
@@ -293,7 +363,7 @@ class DeploymentManager:
         return manager.rollback(endpoint_name, to_version, reason, actor)
 
     def terminate(self, endpoint_name: str | None = None) -> None:
-        endpoint = endpoint_name or self.settings.deployment.endpoint_name
+        endpoint = endpoint_name or default_endpoint(self.settings)
         self.provider.teardown(endpoint)
         deployment = self.status(endpoint)
         if deployment:

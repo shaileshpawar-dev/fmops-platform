@@ -26,6 +26,7 @@ import pandas as pd
 
 from app.core.config import Settings, get_settings
 from app.core.db import Database, dumps, get_database, loads
+from app.core.exceptions import PredictionError, PredictionNotFoundError
 from app.core.logging import get_logger
 from app.core.utils import iso_minutes_ago, percentile, utcnow_iso
 
@@ -108,21 +109,97 @@ class InferenceLog:
             )
             return False
 
-    def record_feedback(
-        self, request_id: str, actual_label: int, source: str = "manual"
-    ) -> int:
-        """Attach ground truth to a previously served prediction."""
-        self.db.execute(
-            "INSERT INTO feedback (request_id, actual_label, source, created_at) "
-            "VALUES (?,?,?,?)",
-            (request_id, int(actual_label), source, utcnow_iso()),
+    def served(self, request_id: str) -> dict[str, Any] | None:
+        """The primary (non-shadow) prediction recorded for a request id."""
+        row = self.db.query_one(
+            "SELECT model_name, model_version, prediction, probability, created_at "
+            "FROM inference_log WHERE request_id = ? AND shadow = 0 AND status = 'ok' "
+            "ORDER BY id DESC LIMIT 1",
+            (request_id,),
         )
-        total = int(self.db.scalar("SELECT COUNT(*) FROM feedback", default=0))
+        return dict(row) if row else None
+
+    def record_feedback(
+        self, request_id: str, actual_label: int | str, source: str = "manual"
+    ) -> dict[str, Any]:
+        """Attach ground truth to a prediction this platform actually served.
+
+        * Feedback for an unknown request is refused: a label with nothing to
+          join to would silently inflate nothing and hide a client bug.
+        * A named label ("yes", "churned") is resolved through the signature of
+          the model version that served the request.
+        * A second label for the same request replaces the first. Corrections
+          happen; counting a request twice would skew live quality and weight
+          that row twice in retraining.
+        """
+        served = self.served(request_id)
+        if served is None:
+            raise PredictionNotFoundError(
+                f"no served prediction has request id {request_id!r}",
+                request_id=request_id,
+            )
+        encoded = self._encode_label(
+            served["model_name"], served["model_version"], actual_label
+        )
+        with self.db.transaction() as conn:
+            replaced = conn.execute(
+                "DELETE FROM feedback WHERE request_id = ?", (request_id,)
+            ).rowcount
+            conn.execute(
+                "INSERT INTO feedback (request_id, actual_label, source, created_at) "
+                "VALUES (?,?,?,?)",
+                (request_id, encoded, source, utcnow_iso()),
+            )
+        total = self.labelled_count(served["model_name"])
         logger.info(
             "feedback.recorded",
-            extra={"request_id": request_id, "label": actual_label, "total": total},
+            extra={
+                "request_id": request_id,
+                "model": served["model_name"],
+                "model_version": served["model_version"],
+                "label": encoded,
+                "replaced": bool(replaced and replaced > 0),
+                "labelled_total": total,
+            },
         )
-        return total
+        return {
+            "request_id": request_id,
+            "model_name": served["model_name"],
+            "model_version": served["model_version"],
+            "actual_label": encoded,
+            "replaced_previous": bool(replaced and replaced > 0),
+            "labelled_total": total,
+        }
+
+    @staticmethod
+    def _encode_label(model_name: str, version: int | None, label: int | str) -> int:
+        if isinstance(label, int):
+            return int(label)
+        text = label.strip()
+        if text in ("0", "1"):
+            return int(text)
+        from app.registry.context import signature_of
+        from app.registry.factory import get_registry
+
+        signature = None
+        if version is not None:
+            try:
+                signature = signature_of(get_registry().get(model_name, int(version)))
+            except Exception:
+                signature = None
+        if signature is not None:
+            for names in (signature.class_labels, signature.display_labels or []):
+                if names and text in names:
+                    return 1 if text == names[1] else 0
+            raise PredictionError(
+                f"label {text!r} is not a class of {model_name}; expected one of "
+                f"{signature.labels} (or 0/1)",
+                model=model_name,
+            )
+        raise PredictionError(
+            f"{model_name} v{version} has no recorded classes; send 0 or 1",
+            model=model_name,
+        )
 
     # -- reads --------------------------------------------------------------- #
     def recent(
@@ -304,15 +381,35 @@ class InferenceLog:
         where = " WHERE " + " AND ".join(clauses)
         return int(self.db.scalar(f"SELECT COUNT(*) FROM inference_log{where}", params, 0))
 
-    def labelled_count(self, model_name: str | None = None) -> int:
+    def labelled_count(
+        self,
+        model_name: str | None = None,
+        since: str | None = None,
+        feedback_since: str | None = None,
+    ) -> int:
+        """Labelled primary predictions, optionally only those served after ``since``.
+
+        ``since`` is how retraining asks "is there anything the serving version
+        has not already learned from": traffic served after a version was
+        trained cannot have been in its training data.
+        """
         sql = (
             "SELECT COUNT(*) FROM inference_log i "
-            "JOIN feedback f ON f.request_id = i.request_id"
+            "JOIN feedback f ON f.request_id = i.request_id "
+            "WHERE i.shadow = 0 AND i.status = 'ok'"
         )
         params: list[Any] = []
         if model_name:
-            sql += " WHERE i.model_name = ?"
+            sql += " AND i.model_name = ?"
             params.append(model_name)
+        if since:
+            sql += " AND i.created_at >= ?"
+            params.append(since)
+        if feedback_since:
+            # Labels that arrived after a point -- e.g. after the last
+            # retraining attempt, which already learned from everything before.
+            sql += " AND f.created_at > ?"
+            params.append(feedback_since)
         return int(self.db.scalar(sql, params, 0))
 
     def purge_older_than(self, days: int) -> int:

@@ -65,8 +65,27 @@ class PathsConfig(BaseModel):
 
 
 class DataConfig(BaseModel):
-    """Dataset shape and generation parameters for the reference use case."""
+    """The data contract one model is trained and served against.
 
+    The defaults describe the bundled reference use case (loan default). Every
+    other model gets its own copy, derived from the dataset it was trained on
+    and recorded as the version's signature -- see :mod:`app.core.signature`.
+
+    ``contract`` decides which of the two worlds applies:
+
+    ``loan_reference``
+        The declared reference dataset. Its hand-written validation schema
+        (ranges, allowed categories) and its domain feature engineering apply.
+    ``inferred``
+        A user dataset. Validation checks what can be checked without domain
+        knowledge -- presence, types, missingness, duplicates, a usable binary
+        target -- and nothing loan-specific ever touches the frame.
+    """
+
+    contract: Literal["loan_reference", "inferred"] = "loan_reference"
+    # For a target whose two classes are not already 0/1: [negative, positive].
+    # Training encodes positive -> 1; serving decodes back to these labels.
+    class_labels: list[str] | None = None
     dataset_name: str = "loan_default"
     target_column: str = "default"
     id_column: str = "application_id"
@@ -228,6 +247,30 @@ class AlertConfig(BaseModel):
     dedupe_window_seconds: int = 300
 
 
+class JobsConfig(BaseModel):
+    """Background execution of training, AutoML, retraining and deployments."""
+
+    # Jobs allowed to run at once, across every process sharing the database.
+    max_running: int = Field(default=1, ge=1, le=16)
+    poll_seconds: float = Field(default=1.0, gt=0)
+    heartbeat_seconds: float = Field(default=10.0, gt=0)
+    # A running job whose worker has not heartbeated for this long is failed.
+    stale_after_seconds: float = Field(default=60.0, gt=0)
+    # Running jobs are asked to stop after this long (0 disables the limit).
+    max_runtime_minutes: int = Field(default=120, ge=0)
+    max_log_lines: int = Field(default=2000, ge=10)
+    # Execute in the submitting thread instead of a worker. Tests and one-shot
+    # CLI runs use this; a server never should.
+    inline: bool = False
+
+
+class AutomationConfig(BaseModel):
+    """The scheduled drift-scan / retraining-trigger / watchdog pass."""
+
+    enabled: bool = True
+    interval_minutes: int = Field(default=15, ge=0)
+
+
 class RetrainingConfig(BaseModel):
     enabled: bool = True
     triggers: list[RetrainingTriggerName] = Field(
@@ -373,6 +416,8 @@ class Settings(BaseSettings):
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     retraining: RetrainingConfig = Field(default_factory=RetrainingConfig)
+    jobs: JobsConfig = Field(default_factory=JobsConfig)
+    automation: AutomationConfig = Field(default_factory=AutomationConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     aws: AWSConfig = Field(default_factory=AWSConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)

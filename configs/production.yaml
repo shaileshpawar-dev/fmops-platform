@@ -1,24 +1,36 @@
-# Production profile: strict gates, canary rollout, auto-rollback, manual
-# approval required before a model reaches the Production stage.
+# Production profile -- the configuration the deployed service actually runs.
+#
+# Deployed on ECS Fargate (one 0.5 vCPU / 1 GB task) behind an ALB. Everything
+# below describes that deployment as it is, not a larger one it could become:
+# models are served in-process, the registry and experiment tracking use the
+# operational SQLite database, and the LLM layer runs the offline mock. The
+# AWS-backed adapters (SageMaker serving and tuning, Bedrock, MLflow registry,
+# S3 artifacts, CloudWatch metrics) exist in code and switch on with the
+# settings named beside each section -- they are not active here.
+#
+# Governance is strict: the same approval thresholds as always, and a human
+# must approve every promotion to Production.
 environment: production
 log_level: INFO
 log_format: json
 
 validation:
   engine: native
-  min_rows: 5000
-  max_missing_fraction: 0.02
-  max_duplicate_fraction: 0.005
-  fail_on_warning: true
+  # Enough rows for an honest train/validation/test split of a binary
+  # classifier; the reference dataset has 8000.
+  min_rows: 500
+  max_missing_fraction: 0.10       # imputed by the pipeline; above this, refused
+  max_duplicate_fraction: 0.01
+  fail_on_warning: false           # warnings are reported, not blocking
 
 training:
   algorithm: hist_gradient_boosting
-  cv_folds: 5
+  cv_folds: 3
 
 tuning:
   enabled: true
-  backend: sagemaker
-  max_trials: 24
+  backend: local_random            # sagemaker needs FMOPS_AWS__ENABLED=true
+  max_trials: 8                    # a 0.5 vCPU task; SageMaker scales this out
   metric: roc_auc
 
 approval:
@@ -32,71 +44,75 @@ approval:
   max_drift_score: 0.20
   comparison_metric: roc_auc
   min_improvement: 0.01
-  require_manual_approval: true
+  require_manual_approval: true    # every promotion needs POST .../approve
 
 deployment:
-  provider: sagemaker
-  strategy: canary
+  provider: local                  # sagemaker: FMOPS_DEPLOYMENT__PROVIDER + AWS enabled
+  strategy: blue_green             # canary and shadow are available per deployment
   endpoint_name: fmops-loan-default-prod
   canary_steps: [10, 25, 50, 100]
-  canary_step_seconds: 300
-  canary_min_requests_per_step: 200
+  canary_step_seconds: 60
+  canary_min_requests_per_step: 20
   canary_max_error_rate: 0.02
   canary_max_latency_ms: 200.0
   auto_rollback: true
   health_check_failures_before_rollback: 3
-  instance_type: ml.m5.xlarge
-  instance_count: 2
 
 drift:
   enabled: true
   threshold: 0.15
   psi_threshold: 0.15
-  min_samples: 1000
+  min_samples: 200
   reference_window: 20000
-  detection_window: 5000
+  detection_window: 2000
   dataset_drift_share: 0.25
 
 monitoring:
   metrics_enabled: true
-  cloudwatch_enabled: true
-  cloudwatch_namespace: FMOps/Production
+  cloudwatch_enabled: false        # container logs reach CloudWatch via awslogs regardless
   latency_slo_ms: 150.0
   error_rate_slo: 0.01
-  prediction_log_sample_rate: 0.25
+  prediction_log_sample_rate: 1.0
 
 alerts:
   enabled: true
-  sinks: [log, database, sns]
+  sinks: [log, database]
   dedupe_window_seconds: 900
 
 retraining:
   enabled: true
-  triggers: [drift, performance, schedule]
-  min_new_samples: 5000
-  auto_deploy_if_better: false   # production promotion is a human decision
-  cooldown_minutes: 360
+  triggers: [drift, performance, volume]
+  min_new_samples: 200
+  auto_deploy_if_better: false     # production promotion is a human decision
+  cooldown_minutes: 60
+
+jobs:
+  max_running: 1                   # one training job at a time on this task size
+  max_runtime_minutes: 60
+
+automation:
+  enabled: true
+  interval_minutes: 15
 
 llm:
-  provider: bedrock
-  model: anthropic.claude-sonnet-4-20250514-v1:0
+  provider: mock                   # bedrock / anthropic / openai need credentials
+  model: mock-small
   safety_enabled: true
   safety_block_on_violation: true
   daily_cost_budget_usd: 100.0
   monthly_cost_budget_usd: 2000.0
 
 aws:
-  enabled: true
-  region: us-east-1
-  s3_prefix: fmops/production
+  enabled: false
+  region: ap-south-1
 
 tracking:
-  backend: mlflow
-  registry_backend: mlflow
-  experiment_name: fmops-loan-default-prod
+  backend: local
+  registry_backend: local
+  experiment_name: fmops-production
 
 security:
-  auth_backend: api_key
+  auth_backend: api_key            # keys arrive only via FMOPS_SECURITY__API_KEYS
   require_auth_for_writes: true
   audit_log_enabled: true
   cors_allow_origins: []
@@ -104,5 +120,5 @@ security:
 
 server:
   port: 8000
-  workers: 4
-  docs_enabled: false
+  workers: 1
+  docs_enabled: true

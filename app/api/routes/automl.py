@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.exceptions import FMOpsError
@@ -102,6 +102,19 @@ class AutoMLRunRequest(BaseModel):
 
     dataset_version: str = Field(max_length=128)
     target_column: str = Field(max_length=128, description="Confirmed target. Required.")
+    model_name: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Registered model the winner becomes a version of. Defaults to "
+            "<target>_classifier; the reference dataset keeps the reference model."
+        ),
+    )
+    positive_label: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Which target class is 'positive'. Defaults to the rarer class.",
+    )
     algorithms: list[str] = Field(
         default_factory=list,
         description="Candidates to try. Empty means the recommended selection.",
@@ -115,7 +128,9 @@ class AutoMLRunRequest(BaseModel):
 
 class AutoMLRunAccepted(BaseModel):
     run_id: str
+    job_id: str
     status: str
+    model_name: str
     algorithms: list[str]
     poll: str
     detail: str
@@ -125,7 +140,7 @@ class AutoMLRunAccepted(BaseModel):
     "/runs", status_code=202, response_model=AutoMLRunAccepted, summary="Start an AutoML run"
 )
 def start_automl_run(
-    request: AutoMLRunRequest, background: BackgroundTasks, response: Response
+    request: AutoMLRunRequest, response: Response, http: Request
 ) -> AutoMLRunAccepted:
     """Queue a candidate search.
 
@@ -138,7 +153,7 @@ def start_automl_run(
         recommend_candidates,
         supported_problem_types,
     )
-    from app.automl.runner import execute_automl_run, get_automl_store
+    from app.automl.runner import get_automl_store
     from app.data.versioning import get_dataset_registry
     from app.training.model_factory import available_algorithms
 
@@ -181,8 +196,16 @@ def start_automl_run(
             available=sorted(k for k, v in availability.items() if v),
         )
 
+    from app.data.contract import resolve_model_name
+
+    model_name = resolve_model_name(
+        frame, request.target_column, request.model_name, request.positive_label
+    )
+
     store = get_automl_store()
     run_id = store.create(
+        model_name=model_name,
+        positive_label=request.positive_label,
         dataset_version=request.dataset_version,
         target=request.target_column,
         problem_type=problem,
@@ -192,12 +215,23 @@ def start_automl_run(
         target_stage=request.target_stage,
         max_models=request.max_models,
     )
-    background.add_task(execute_automl_run, run_id)
+    from app.api.security import request_actor
+    from app.jobs.runner import get_job_runner
+
+    job = get_job_runner().submit(
+        "automl",
+        {"run_id": run_id},
+        model_name=model_name,
+        resource_id=run_id,
+        requested_by=request_actor(http),
+    )
 
     response.headers["Location"] = f"/api/v1/automl/runs/{run_id}"
     return AutoMLRunAccepted(
         run_id=run_id,
+        job_id=job["id"],
         status="queued",
+        model_name=model_name,
         algorithms=chosen,
         poll=f"/api/v1/automl/runs/{run_id}",
         detail=f"AutoML will train up to {len(chosen)} candidate model(s) in the background",

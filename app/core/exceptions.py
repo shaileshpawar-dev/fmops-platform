@@ -149,6 +149,20 @@ class PredictionError(FMOpsError):
 # --------------------------------------------------------------------------- #
 # Monitoring / drift / retraining
 # --------------------------------------------------------------------------- #
+class InvalidPredictionInputError(PredictionError):
+    """The request does not match the serving version's input contract."""
+
+    code = "invalid_prediction_input"
+    http_status = 422
+
+
+class PredictionNotFoundError(PredictionError):
+    """Feedback for a request the platform never served."""
+
+    code = "prediction_not_found"
+    http_status = 404
+
+
 class MonitoringError(FMOpsError):
     code = "monitoring_error"
 

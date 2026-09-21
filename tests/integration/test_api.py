@@ -255,13 +255,40 @@ def test_production_endpoint_reports_the_rollback_target(deployed_client, settin
     assert "rollback_target" in body
 
 
-def test_illegal_stage_transition_is_rejected(deployed_client, settings, registry):
+def test_promotion_cannot_bypass_the_gate_through_the_stage_endpoint(
+    deployed_client, settings, registry
+):
+    """The raw stage endpoint must not promote -- legal hop or not.
+
+    Before, it enforced only adjacency, so a version the gate rejected could be
+    walked Development -> Validation -> Staging and then deployed. Promotion now
+    goes through /approve, which runs the gate.
+    """
     client, _ = deployed_client
     name = settings.tracking.registered_model_name
     version = registry.register(name, "file:///new")
+    for stage in ("Production", "Staging"):
+        response = client.post(
+            f"/api/v1/models/{name}/versions/{version.version}/stage",
+            json={"stage": stage, "reason": "skip the queue"},
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "gate_refused"
+        assert "/approve" in response.json()["error"]["message"]
+
+
+def test_illegal_stage_transition_is_rejected(deployed_client, settings, registry):
+    """The stage machine still rejects moves it does not allow."""
+    from app.schemas.common import ModelStage
+
+    client, _ = deployed_client
+    name = settings.tracking.registered_model_name
+    version = registry.register(name, "file:///new")
+    registry.transition_stage(name, version.version, ModelStage.VALIDATION)
+    registry.transition_stage(name, version.version, ModelStage.STAGING)
     response = client.post(
         f"/api/v1/models/{name}/versions/{version.version}/stage",
-        json={"stage": "Production", "reason": "skip the queue"},
+        json={"stage": "Development", "reason": "not a legal move from Staging"},
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "invalid_stage_transition"
@@ -302,9 +329,39 @@ def test_deploying_an_unapproved_version_is_refused(deployed_client, settings, r
     name = settings.tracking.registered_model_name
     version = registry.register(name, "file:///unapproved")
     response = client.post("/api/v1/deployments", json={"model_version": version.version})
-    assert response.status_code == 500
-    assert response.json()["error"]["code"] == "deployment_failed"
+    # A refusal is the platform working, not failing: 409, before any job is queued.
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "deployment_refused"
     assert "approval gate" in response.json()["error"]["message"]
+    assert client.get("/api/v1/jobs?kind=deployment").json()["count"] == 0
+
+
+def test_the_deploy_api_has_no_gate_override(deployed_client, settings, registry):
+    """`force` used to be a public query parameter that deployed any version."""
+    client, _ = deployed_client
+    name = settings.tracking.registered_model_name
+    version = registry.register(name, "file:///unapproved")
+    response = client.post(
+        "/api/v1/deployments?force=true", json={"model_version": version.version}
+    )
+    assert response.status_code == 409
+    assert "force" not in client.get("/openapi.json").json()["paths"]["/api/v1/deployments"][
+        "post"
+    ].get("parameters", [{}])[0].get("name", "")
+
+
+def test_a_model_cannot_be_deployed_onto_another_models_endpoint(
+    deployed_client, settings, registry
+):
+    client, _ = deployed_client
+    name = settings.tracking.registered_model_name
+    live = registry.get_latest(name)
+    response = client.post(
+        "/api/v1/deployments",
+        json={"model_version": live.version, "endpoint_name": "fmops-some-other-model"},
+    )
+    assert response.status_code == 409
+    assert "does not belong to" in response.json()["error"]["message"]
 
 
 # --------------------------------------------------------------------------- #

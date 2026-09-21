@@ -102,6 +102,9 @@ class EndpointHealth(BaseModel):
 
 
 class RollbackRequest(BaseModel):
+    """Roll one model's endpoint back. ``model_name`` picks the endpoint."""
+
+    model_name: str | None = None
     endpoint_name: str | None = None
     to_version: int | None = Field(
         default=None, description="Defaults to the recorded previous version."

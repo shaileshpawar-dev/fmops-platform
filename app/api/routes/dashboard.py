@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import HTMLResponse
 
 from app.core.config import get_settings
@@ -28,13 +28,22 @@ router = APIRouter(tags=["dashboard"])
 
 
 @router.get("/api/v1/dashboard", summary="Everything the dashboard renders")
-def dashboard_data() -> dict[str, Any]:
+def dashboard_data(
+    model: str | None = Query(
+        default=None,
+        description="Model the per-model sections describe. Defaults to the most "
+        "recently active model.",
+    ),
+) -> dict[str, Any]:
     """Aggregated state for the dashboard, in one call.
 
-    Each section degrades independently: a failure gathering LLM stats must not
-    blank out the model section.
+    Platform-wide sections (every model, jobs, counts, activity) plus the
+    per-model sections for one focus model. Each section degrades
+    independently: a failure gathering LLM stats must not blank out the model
+    section.
     """
     settings = get_settings()
+    name = model or _focus_model()
     payload: dict[str, Any] = {
         "service": {
             "name": settings.service_name,
@@ -54,23 +63,170 @@ def dashboard_data() -> dict[str, Any]:
     # instant, so compute it once here and hand the same value to both. This is
     # de-duplication within one request, not a cache: nothing is retained
     # between requests and the numbers are identical to computing it twice.
-    live = _safe_value(_live_performance, "live_performance")
+    live = _safe_value(lambda: _live_performance(name), "live_performance")
 
-    payload["model"] = _safe(_model_section, "model")
-    payload["deployment"] = _safe(_deployment_section, "deployment")
-    payload["drift"] = _safe(_drift_section, "drift")
-    payload["system"] = _safe(lambda: _system_section(live), "system")
+    payload["focus_model"] = name
+    payload["platform"] = _safe(_platform_section, "platform")
+    payload["models"] = _safe(_models_section, "models")
+    payload["jobs"] = _safe(_jobs_section, "jobs")
+    payload["activity"] = _safe(_activity_section, "activity")
+    payload["model"] = _safe(lambda: _model_section(name), "model")
+    payload["deployment"] = _safe(lambda: _deployment_section(name), "deployment")
+    payload["drift"] = _safe(lambda: _drift_section(name), "drift")
+    payload["system"] = _safe(lambda: _system_section(name, live), "system")
     payload["llm"] = _safe(_llm_section, "llm")
-    payload["retraining"] = _safe(lambda: _retraining_section(live), "retraining")
+    payload["retraining"] = _safe(lambda: _retraining_section(name, live), "retraining")
     payload["alerts"] = _safe(_alerts_section, "alerts")
     return payload
 
 
-def _live_performance():
-    """Live quality for the serving version, computed once per request."""
+def _focus_model() -> str:
+    """The model with the most recent registry activity, else the reference model."""
+    from app.core.db import get_database
+    from app.registry.context import default_model_name
+
+    row = get_database().query_one(
+        "SELECT name FROM model_versions ORDER BY updated_at DESC, id DESC LIMIT 1"
+    )
+    return row["name"] if row else default_model_name()
+
+
+def _live_performance(name: str):
+    """Live quality for the focus model, computed once per request."""
     from app.monitoring.service import get_monitoring_service
 
-    return get_monitoring_service().live_performance()
+    return get_monitoring_service().live_performance(model_name=name)
+
+
+def _platform_section() -> dict[str, Any]:
+    """Counts of what actually exists. Every number is a COUNT over a table."""
+    from app.core.db import get_database
+    from app.core.utils import iso_days_ago
+    from app.data.versioning import get_dataset_registry
+
+    db = get_database()
+
+    def count(sql: str, params: tuple = ()) -> int:
+        return int(db.scalar(sql, params, 0))
+
+    week = iso_days_ago(7)
+    return {
+        "available": True,
+        "models": count("SELECT COUNT(DISTINCT name) FROM model_versions"),
+        "model_versions": count("SELECT COUNT(*) FROM model_versions"),
+        "datasets": len(get_dataset_registry().list_versions()),
+        "training_runs": count("SELECT COUNT(*) FROM training_runs")
+        + count("SELECT COUNT(*) FROM automl_runs"),
+        "active_deployments": count(
+            "SELECT COUNT(*) FROM (SELECT endpoint_name FROM deployments "
+            "WHERE state IN ('live', 'in_progress') GROUP BY endpoint_name)"
+        ),
+        "predictions_7d": count(
+            "SELECT COUNT(*) FROM inference_log WHERE shadow = 0 AND created_at >= ?", (week,)
+        ),
+        "drift_detected_7d": count(
+            "SELECT COUNT(*) FROM drift_reports WHERE drift_detected = 1 AND created_at >= ?",
+            (week,),
+        ),
+        "retraining_events": count("SELECT COUNT(*) FROM retraining_events"),
+        "open_alerts": count("SELECT COUNT(*) FROM alerts WHERE acknowledged = 0"),
+    }
+
+
+def _models_section() -> dict[str, Any]:
+    """One line per registered model: what serves, where, and whether it drifted."""
+    from app.core.db import get_database
+    from app.deployment.manager import get_deployment_manager
+    from app.registry.context import endpoint_for, signature_of
+    from app.registry.factory import get_registry
+
+    registry = get_registry()
+    manager = get_deployment_manager()
+    db = get_database()
+    out = []
+    for item in registry.list_models():
+        name = item["name"]
+        serving = registry.get_serving(name)
+        deployment = manager.status(endpoint_for(name))
+        signature = signature_of(serving) if serving else None
+        drift = db.query_one(
+            "SELECT drift_detected, created_at FROM drift_reports WHERE model_name = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (name,),
+        )
+        pending = int(
+            db.scalar(
+                "SELECT COUNT(*) FROM model_versions WHERE name = ? AND status = 'pending'",
+                (name,),
+                0,
+            )
+        )
+        out.append(
+            {
+                "name": name,
+                "versions": item.get("versions"),
+                "endpoint": endpoint_for(name),
+                "serving_version": serving.version if serving else None,
+                "serving_stage": serving.stage.value if serving else None,
+                "roc_auc": float(serving.metrics.get("roc_auc", 0.0)) if serving else None,
+                "target": signature.target if signature else None,
+                "deployment_state": deployment.state.value if deployment else None,
+                "live_version": deployment.current_version if deployment else None,
+                "last_drift_detected": bool(drift["drift_detected"]) if drift else None,
+                "last_drift_at": drift["created_at"] if drift else None,
+                "awaiting_approval": pending,
+                "updated_at": item.get("updated_at"),
+            }
+        )
+    return {"available": True, "models": out}
+
+
+def _jobs_section() -> dict[str, Any]:
+    from app.jobs.store import get_job_store
+
+    store = get_job_store()
+    return {
+        "available": True,
+        "counts": store.counts(),
+        "recent": [
+            {
+                k: job.get(k)
+                for k in (
+                    "id",
+                    "kind",
+                    "status",
+                    "model_name",
+                    "resource_id",
+                    "error",
+                    "created_at",
+                    "started_at",
+                    "finished_at",
+                )
+            }
+            for job in store.list(limit=8)
+        ],
+    }
+
+
+def _activity_section() -> dict[str, Any]:
+    """What happened, newest first -- straight from the audit log."""
+    from app.core.audit import get_audit_log
+
+    entries = get_audit_log().recent(20)
+    return {
+        "available": True,
+        "events": [
+            {
+                "action": e.get("action"),
+                "resource_type": e.get("resource_type"),
+                "resource_id": e.get("resource_id"),
+                "outcome": e.get("outcome"),
+                "actor": e.get("actor"),
+                "created_at": e.get("created_at"),
+            }
+            for e in entries
+        ],
+    }
 
 
 def _safe_value(fn, name: str):
@@ -90,12 +246,11 @@ def _safe(fn, name: str) -> dict[str, Any]:
         return {"error": str(exc), "available": False}
 
 
-def _model_section() -> dict[str, Any]:
+def _model_section(name: str) -> dict[str, Any]:
     from app.registry.factory import get_registry
 
     settings = get_settings()
     registry = get_registry()
-    name = settings.tracking.registered_model_name
 
     production = registry.get_production(name)
     previous = registry.previous_production(name)
@@ -127,13 +282,15 @@ def _model_section() -> dict[str, Any]:
     }
 
 
-def _deployment_section() -> dict[str, Any]:
+def _deployment_section(name: str) -> dict[str, Any]:
     from app.deployment.manager import get_deployment_manager
+    from app.registry.context import endpoint_for
 
     manager = get_deployment_manager()
-    deployment = manager.status()
-    health = manager.health()
-    recent = manager.list(limit=5)
+    endpoint = endpoint_for(name)
+    deployment = manager.status(endpoint)
+    health = manager.health(endpoint)
+    recent = manager.list(endpoint, limit=5)
 
     return {
         "available": deployment is not None,
@@ -165,11 +322,11 @@ def _deployment_section() -> dict[str, Any]:
     }
 
 
-def _drift_section() -> dict[str, Any]:
+def _drift_section(name: str) -> dict[str, Any]:
     from app.monitoring.drift import recent_drift_reports
 
     settings = get_settings()
-    reports = recent_drift_reports(settings.tracking.registered_model_name, limit=10)
+    reports = recent_drift_reports(name, limit=10)
     latest = reports[0] if reports else None
     detail = latest.get("report", {}) if latest else {}
 
@@ -205,7 +362,7 @@ def _drift_section() -> dict[str, Any]:
     }
 
 
-def _system_section(performance: Any = None) -> dict[str, Any]:
+def _system_section(name: str, performance: Any = None) -> dict[str, Any]:
     from app.monitoring.resource_monitor import latest_resources
     from app.monitoring.service import get_monitoring_service
 
@@ -213,10 +370,10 @@ def _system_section(performance: Any = None) -> dict[str, Any]:
     # recompute service_metrics and live_performance a second and third time,
     # which on a busy inference log is the most expensive thing on the page.
     service = get_monitoring_service()
-    metrics = service.service_metrics(60)
+    metrics = service.service_metrics(60, name)
     resources = latest_resources()
     if performance is None:
-        performance = service.live_performance()
+        performance = service.live_performance(model_name=name)
 
     return {
         "available": True,
@@ -295,11 +452,11 @@ def _llm_section() -> dict[str, Any]:
     }
 
 
-def _retraining_section(live_performance: Any = None) -> dict[str, Any]:
+def _retraining_section(name: str, live_performance: Any = None) -> dict[str, Any]:
     from app.retraining.trigger import evaluate_trigger, get_event_store
 
-    events = get_event_store().recent(5)
-    decision = evaluate_trigger(live_performance=live_performance)
+    events = get_event_store().recent(5, model_name=name)
+    decision = evaluate_trigger(live_performance=live_performance, model_name=name)
     return {
         "available": True,
         "would_trigger": decision.should_retrain,

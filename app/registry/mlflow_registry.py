@@ -48,7 +48,13 @@ _RESERVED_TAGS = (
     "fmops.algorithm",
     "fmops.params",
     "fmops.created_by",
+    "fmops.signature",
 )
+
+# MLflow rejects tag values much past 5000 characters. A signature for a wide
+# dataset can exceed that; the artifact sidecar always carries the full copy,
+# and the serving layer falls back to it.
+_MAX_TAG_CHARS = 4900
 
 
 def _alias(stage: ModelStage) -> str:
@@ -137,6 +143,7 @@ class MLflowModelRegistry(ModelRegistry):
             created_at=_ms_to_iso(mv.creation_timestamp),
             updated_at=_ms_to_iso(mv.last_updated_timestamp),
             created_by=tags.get("fmops.created_by"),
+            signature=_signature_from_tag(tags.get("fmops.signature")),
         )
 
     # -- registration -------------------------------------------------------- #
@@ -154,14 +161,21 @@ class MLflowModelRegistry(ModelRegistry):
         tags: dict[str, str] | None = None,
         description: str = "",
         created_by: str | None = None,
+        signature: dict[str, Any] | None = None,
     ) -> ModelVersion:
         self._ensure_registered_model(name)
+        signature_json = json.dumps(signature) if signature else ""
         all_tags = {
             STAGE_TAG: ModelStage.DEVELOPMENT.value,
             STATUS_TAG: ModelStatus.READY.value,
             "fmops.git_commit": git_commit,
             "fmops.algorithm": algorithm,
             "fmops.params": json.dumps(jsonable(params or {}))[:4900],
+            **(
+                {"fmops.signature": signature_json}
+                if signature_json and len(signature_json) <= _MAX_TAG_CHARS
+                else {}
+            ),
             f"{TRANSITION_TAG_PREFIX}0": json.dumps(
                 {
                     "from": None,
@@ -425,3 +439,13 @@ def _ms_to_iso(milliseconds: int | None) -> str:
         ]
         + "Z"
     )
+
+
+def _signature_from_tag(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None

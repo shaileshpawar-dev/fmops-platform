@@ -17,6 +17,7 @@ from app.schemas.common import ModelStage
 from app.schemas.evaluation import ApprovalResult, ModelComparison
 from app.schemas.model import ModelVersion, TrainingRunResult
 from app.training.approval import approve_and_compare, promote_if_eligible
+from app.training.decisions import get_gate_decisions
 
 logger = get_logger(__name__)
 
@@ -99,6 +100,22 @@ def register_and_promote(
         reason = effective_comparison.reason
     else:
         reason = "model already at the target stage"
+
+    # The verdict as a record, not only as side effects on the version.
+    beaten = effective_comparison is not None and not effective_comparison.candidate_is_better
+    get_gate_decisions().record(
+        model_name=run.model_name,
+        model_version=run.registered_version,
+        source="pipeline",
+        decision="rejected" if beaten else approval.decision.value,
+        reason=reason,
+        approval=approval,
+        comparison=comparison,
+        thresholds=settings.approval.model_dump(mode="json"),
+        target_stage=target_stage.value,
+        final_stage=after.stage.value,
+        actor=actor,
+    )
 
     return PromotionOutcome(
         model_version=after,

@@ -138,6 +138,16 @@ def build_auth_backend(settings: Settings | None = None) -> AuthBackend:
     return NoAuthBackend()
 
 
+def request_actor(request: Request) -> str:
+    """Who is making this request, as the audit log should record it.
+
+    Always the authenticated principal -- never a value the caller supplies in
+    the body, which anyone could set to anyone.
+    """
+    principal = getattr(request.state, "principal", None)
+    return principal.subject if principal is not None else ANONYMOUS.subject
+
+
 class AuthMiddlewareState:
     """Holds the backend and decides which requests need credentials."""
 

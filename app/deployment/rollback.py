@@ -26,6 +26,7 @@ from app.core.exceptions import RollbackError
 from app.core.logging import get_logger
 from app.deployment.base import DeploymentProvider, DeploymentStore, get_deployment_store
 from app.registry.base import ModelRegistry
+from app.registry.context import default_model_name, endpoint_for
 from app.registry.factory import get_registry
 from app.schemas.common import DeploymentState, HealthStatus, ModelStage
 from app.schemas.deployment import Deployment, RollbackResult, TrafficSplit
@@ -80,7 +81,9 @@ class RollbackManager:
         actor: str = "system",
         restore_registry_stage: bool = True,
     ) -> RollbackResult:
-        endpoint = endpoint_name or self.settings.deployment.endpoint_name
+        endpoint = endpoint_name or endpoint_for(
+            default_model_name(self.settings), self.settings
+        )
         deployment = self.store.active(endpoint) or self.store.latest(endpoint)
         if deployment is None:
             raise RollbackError(

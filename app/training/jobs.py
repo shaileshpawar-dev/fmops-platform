@@ -55,6 +55,10 @@ class TrainingRun:
     promote: bool = False
     target_stage: str | None = None
     model_name: str | None = None
+    # Set for a user model: the column it predicts and its positive class. The
+    # reference model's contract comes from configuration instead.
+    target_column: str | None = None
+    positive_label: str | None = None
     model_version: int | None = None
     exit_code: int | None = None
     error: str | None = None
@@ -128,6 +132,8 @@ def _row_to_run(row: Any) -> TrainingRun:
         error=data.get("error"),
         report=report if isinstance(report, dict) else {},
         requested_by=data.get("requested_by"),
+        target_column=data.get("target_column"),
+        positive_label=data.get("positive_label"),
         created_at=data.get("created_at") or "",
         started_at=data.get("started_at"),
         completed_at=data.get("completed_at"),
@@ -146,6 +152,9 @@ class TrainingRunStore:
         promote: bool,
         target_stage: str,
         requested_by: str | None = None,
+        model_name: str | None = None,
+        target_column: str | None = None,
+        positive_label: str | None = None,
     ) -> TrainingRun:
         run = TrainingRun(
             id=f"train-{uuid.uuid4().hex[:16]}",
@@ -155,6 +164,9 @@ class TrainingRunStore:
             tune=tune,
             promote=promote,
             target_stage=target_stage,
+            model_name=model_name,
+            target_column=target_column,
+            positive_label=positive_label,
             requested_by=requested_by,
             created_at=_now(),
             updated_at=_now(),
@@ -163,8 +175,9 @@ class TrainingRunStore:
             """
             INSERT INTO training_runs
                 (id, status, dataset_version, algorithm, tune, promote, target_stage,
-                 report, requested_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
+                 model_name, target_column, positive_label, report, requested_by,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
             """,
             (
                 run.id,
@@ -174,6 +187,9 @@ class TrainingRunStore:
                 int(run.tune),
                 int(run.promote),
                 run.target_stage,
+                run.model_name,
+                run.target_column,
+                run.positive_label,
                 run.requested_by,
                 run.created_at,
                 run.updated_at,
@@ -221,21 +237,29 @@ class TrainingRunStore:
         )
         return [_row_to_run(r) for r in rows]
 
-    def reconcile_orphans(self) -> int:
-        """Mark runs the process was executing when it died as failed.
+    def fail(self, run_id: str, reason: str) -> None:
+        """Mark one in-flight run failed -- its job was lost or cancelled."""
+        run = self.get(run_id)
+        if run is None or run.status in TERMINAL:
+            return
+        self.update(run_id, status=FAILED, error=reason, completed_at=_now())
 
-        Background tasks do not survive a restart. Leaving them ``running`` would
-        show a job making progress that no longer exists.
+    def reconcile_orphans(self) -> int:
+        """Fail in-flight runs that no queued or running job owns.
+
+        Those are runs whose executing process restarted. A run owned by a live
+        job -- possibly in another worker process -- is left alone; failing it
+        would kill work that is still happening.
         """
         rows = get_database().query(
-            "SELECT id FROM training_runs WHERE status IN (?, ?)", (QUEUED, RUNNING)
+            "SELECT id FROM training_runs WHERE status IN (?, ?) "
+            "AND id NOT IN (SELECT resource_id FROM jobs WHERE resource_id IS NOT NULL "
+            "AND status IN ('queued', 'running'))",
+            (QUEUED, RUNNING),
         )
         for row in rows:
-            self.update(
-                row["id"],
-                status=FAILED,
-                error="the API process restarted while this run was in flight",
-                completed_at=_now(),
+            self.fail(
+                row["id"], "no job is executing this run: the process that ran it restarted"
             )
         if rows:
             logger.warning("training.orphans_reconciled", extra={"count": len(rows)})
@@ -249,12 +273,14 @@ def get_training_run_store() -> TrainingRunStore:
     return _store
 
 
-def execute_training_run(run_id: str) -> None:
-    """Run the existing training pipeline and record the outcome.
+def execute_training_run(run_id: str, checkpoint: Any = None) -> str:
+    """Run the training pipeline and record the outcome. Returns the run status.
 
     Every decision -- whether the data validates, whether the model clears the
     approval gate, whether it beats the incumbent -- belongs to the pipeline.
-    This function only translates its exit code into a run status.
+    This function builds the run's data contract (the reference one, or one
+    derived from the dataset and the chosen target) and translates the
+    pipeline's exit code into a run status.
     """
     from pipelines import training_pipeline
 
@@ -262,22 +288,36 @@ def execute_training_run(run_id: str) -> None:
     run = store.get(run_id)
     if run is None:
         logger.error("training.run_missing", extra={"run_id": run_id})
-        return
+        return FAILED
 
     store.update(run_id, status=RUNNING, started_at=_now())
     try:
+        if checkpoint is not None:
+            checkpoint()
+        run_settings = None
+        if run.target_column:
+            from app.data.contract import contract_for_target
+            from app.data.versioning import get_dataset_registry
+
+            frame = get_dataset_registry().load(run.dataset_version)
+            run_settings = contract_for_target(frame, run.target_column, run.positive_label)
         exit_code, report = training_pipeline.run(
             dataset_version=run.dataset_version,
             algorithm=run.algorithm,
             tune=run.tune,
             promote=run.promote,
             target_stage=run.target_stage or "Production",
+            model_name=run.model_name,
+            settings=run_settings,
         )
     except Exception as exc:
+        if exc.__class__.__name__ == "JobCancelled":
+            raise
         logger.exception("training.run_failed", extra={"run_id": run_id})
-        store.update(run_id, status=FAILED, error=str(exc), exit_code=1, completed_at=_now())
-        audit("training.run_failed", "training_run", run_id, outcome="failure", error=str(exc))
-        return
+        message = getattr(exc, "message", None) or str(exc)
+        store.update(run_id, status=FAILED, error=message, exit_code=1, completed_at=_now())
+        audit("training.run_failed", "training_run", run_id, outcome="failure", error=message)
+        return FAILED
 
     # The pipeline uses exit code 2 for "ran fine, candidate not accepted",
     # which is a result rather than a failure and must not be shown as one.
@@ -288,12 +328,6 @@ def execute_training_run(run_id: str) -> None:
     else:
         status = FAILED
 
-    # The pipeline report is flat: model_version, algorithm, dataset_version,
-    # metrics, approval_decision, promoted. The model *name* is not in it
-    # because the pipeline trains exactly one configured model, so it comes
-    # from settings rather than being invented here.
-    from app.core.config import get_settings
-
     model_version = report.get("model_version")
     store.update(
         run_id,
@@ -301,11 +335,7 @@ def execute_training_run(run_id: str) -> None:
         exit_code=exit_code,
         error=report.get("error"),
         report=report,
-        model_name=(
-            get_settings().tracking.registered_model_name
-            if model_version is not None
-            else None
-        ),
+        model_name=report.get("model_name") if model_version is not None else run.model_name,
         model_version=model_version,
         algorithm=report.get("algorithm") or run.algorithm,
         dataset_version=report.get("dataset_version") or run.dataset_version,
@@ -326,3 +356,4 @@ def execute_training_run(run_id: str) -> None:
         "training.run_finished",
         extra={"run_id": run_id, "status": status, "exit_code": exit_code},
     )
+    return status

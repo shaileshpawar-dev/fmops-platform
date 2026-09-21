@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from app.automl.profiler import DatasetProfile, profile_frame
+from app.automl.profiler import profile_frame
 from app.automl.recommend import supported_problem_types
 from app.core.audit import audit
 from app.core.db import get_database
@@ -62,6 +62,7 @@ class Candidate:
     metrics: dict[str, float] = field(default_factory=dict)
     duration_seconds: float | None = None
     model_version: int | None = None
+    run_id: str | None = None
     error: str | None = None
     rank: int | None = None
 
@@ -72,6 +73,7 @@ class Candidate:
             "metrics": self.metrics,
             "duration_seconds": self.duration_seconds,
             "model_version": self.model_version,
+            "run_id": self.run_id,
             "error": self.error,
             "rank": self.rank,
         }
@@ -90,6 +92,8 @@ class AutoMLRunStore:
         tune: bool,
         target_stage: str,
         max_models: int,
+        model_name: str | None = None,
+        positive_label: str | None = None,
     ) -> str:
         run_id = f"automl-{uuid.uuid4().hex[:16]}"
         get_database().execute(
@@ -97,8 +101,8 @@ class AutoMLRunStore:
             INSERT INTO automl_runs
                 (id, status, dataset_version, target_column, problem_type, algorithms,
                  primary_metric, tune, target_stage, max_models, profile, candidates,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', '[]', ?, ?)
+                 created_at, updated_at, model_name, positive_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', '[]', ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -113,12 +117,15 @@ class AutoMLRunStore:
                 int(max_models),
                 _now(),
                 _now(),
+                model_name,
+                positive_label,
             ),
         )
         audit(
             "automl.run_requested",
             "automl_run",
             run_id,
+            model_name=model_name,
             dataset_version=dataset_version,
             target=target,
             problem_type=problem_type,
@@ -159,17 +166,24 @@ class AutoMLRunStore:
         )
         return [_row_to_run(r) for r in rows]
 
+    def fail(self, run_id: str, reason: str) -> None:
+        run = self.get(run_id)
+        if run is None or run["status"] in TERMINAL:
+            return
+        self.update(run_id, status=FAILED, error=reason, completed_at=_now())
+
     def reconcile_orphans(self) -> int:
+        """Fail in-flight runs that no queued or running job owns (see the
+        training store: a live job in another process must not be touched)."""
         rows = get_database().query(
-            "SELECT id FROM automl_runs WHERE status NOT IN (?, ?, ?)",
+            "SELECT id FROM automl_runs WHERE status NOT IN (?, ?, ?) "
+            "AND id NOT IN (SELECT resource_id FROM jobs WHERE resource_id IS NOT NULL "
+            "AND status IN ('queued', 'running'))",
             (COMPLETED, COMPLETED_WITH_WARNINGS, FAILED),
         )
         for row in rows:
-            self.update(
-                row["id"],
-                status=FAILED,
-                error="the API process restarted while this run was in flight",
-                completed_at=_now(),
+            self.fail(
+                row["id"], "no job is executing this run: the process that ran it restarted"
             )
         if rows:
             logger.warning("automl.orphans_reconciled", extra={"count": len(rows)})
@@ -193,61 +207,6 @@ _store = AutoMLRunStore()
 
 def get_automl_store() -> AutoMLRunStore:
     return _store
-
-
-# --------------------------------------------------------------------------- #
-# Per-run settings
-# --------------------------------------------------------------------------- #
-def build_run_settings(profile: DatasetProfile, target: str, features: list[str]) -> Any:
-    """A copy of the settings pointed at this run's target and features.
-
-    ``train_model`` takes a ``Settings`` and ``split_features_target`` reads its
-    ``DataConfig``, so overriding the copy is enough to train on a column the
-    global configuration has never heard of. The global settings object is left
-    alone -- mutating it would leak this run's target into every other request
-    in the process.
-    """
-    from app.core.config import get_settings
-
-    base = get_settings()
-    by_name = {c.name: c for c in profile.columns}
-    identifiers = [c.name for c in profile.columns if c.likely_identifier and c.name != target]
-    datetimes = [c.name for c in profile.columns if c.kind == "datetime" and c.name != target]
-
-    id_column = identifiers[0] if identifiers else base.data.id_column
-    timestamp_column = datetimes[0] if datetimes else base.data.timestamp_column
-
-    # split_features_target drops the target, the id column and the timestamp
-    # column by name before the preprocessor ever sees the frame. If a dropped
-    # column is still listed as a feature the ColumnTransformer asks for a
-    # column that no longer exists and every candidate dies at fit time. The
-    # two sets have to be derived from the same decision, so they are here.
-    dropped = {target, id_column, timestamp_column}
-    usable = [f for f in features if f not in dropped]
-    numeric = [f for f in usable if by_name.get(f) and by_name[f].kind == "numeric"]
-    categorical = [
-        f for f in usable if by_name.get(f) and by_name[f].kind in ("categorical", "boolean")
-    ]
-
-    return base.model_copy(
-        update={
-            "data": base.data.model_copy(
-                update={
-                    "target_column": target,
-                    "numeric_features": numeric,
-                    "categorical_features": categorical,
-                    # split_features_target drops these by name; feeding it the
-                    # profiled identifier keeps a key out of the feature matrix
-                    # even when the dataset does not use the configured name.
-                    "id_column": identifiers[0] if identifiers else base.data.id_column,
-                    "timestamp_column": (
-                        datetimes[0] if datetimes else base.data.timestamp_column
-                    ),
-                }
-            )
-        },
-        deep=True,
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -279,8 +238,14 @@ def rank_candidates(candidates: list[Candidate], primary_metric: str) -> list[Ca
 # --------------------------------------------------------------------------- #
 # Execution
 # --------------------------------------------------------------------------- #
-def execute_automl_run(run_id: str) -> None:
-    """Profile, train every candidate, rank them, register the winner."""
+def execute_automl_run(run_id: str, checkpoint: Any = None) -> str:
+    """Profile, train every candidate, rank them, register the winner.
+
+    ``checkpoint`` is called before each candidate; it raises when the job has
+    been cancelled, which stops the run between fits rather than mid-write.
+    Returns the run's final status.
+    """
+    from app.data.contract import InvalidTrainingTargetError, contract_for_target
     from app.data.versioning import get_dataset_registry
     from app.schemas.model import ModelStage, TrainingRequest
     from app.training.registry import register_and_promote
@@ -290,7 +255,7 @@ def execute_automl_run(run_id: str) -> None:
     run = store.get(run_id)
     if run is None:
         logger.error("automl.run_missing", extra={"run_id": run_id})
-        return
+        return FAILED
 
     started = time.perf_counter()
     try:
@@ -312,7 +277,13 @@ def execute_automl_run(run_id: str) -> None:
             raise AutoMLError("no usable feature columns remain after profiling")
 
         store.update(run_id, profile=profile.to_dict(), status=TRAINING)
-        settings = build_run_settings(profile, run["target_column"], features)
+        try:
+            settings = contract_for_target(
+                frame, run["target_column"], run.get("positive_label"), profile=profile
+            )
+        except InvalidTrainingTargetError as exc:
+            raise AutoMLError(exc.message) from exc
+        model_name = run.get("model_name") or settings.tracking.registered_model_name
 
         candidates = [Candidate(algorithm=a) for a in run["algorithms"][:MAX_CANDIDATES]]
         # TrainingRunResult holds paths and metrics, not the fitted estimator,
@@ -323,12 +294,15 @@ def execute_automl_run(run_id: str) -> None:
         store.update(run_id, candidates=[c.to_dict() for c in candidates])
 
         for cand in candidates:
+            if checkpoint is not None:
+                checkpoint()
             cand.status = "training"
             store.update(run_id, candidates=[c.to_dict() for c in candidates])
             t0 = time.perf_counter()
             try:
                 result = train_model(
                     TrainingRequest(
+                        model_name=model_name,
                         dataset_version=run["dataset_version"],
                         algorithm=cand.algorithm,
                         tune=run["tune"],
@@ -338,6 +312,7 @@ def execute_automl_run(run_id: str) -> None:
                 results[cand.algorithm] = result
                 cand.metrics = result.evaluation.metrics.as_dict() if result.evaluation else {}
                 cand.model_version = result.registered_version
+                cand.run_id = result.run_id
                 cand.duration_seconds = round(time.perf_counter() - t0, 2)
                 cand.status = "completed"
                 logger.info(
@@ -349,8 +324,10 @@ def execute_automl_run(run_id: str) -> None:
                     },
                 )
             except Exception as exc:  # one bad candidate must not sink the run
+                if exc.__class__.__name__ == "JobCancelled":
+                    raise
                 cand.status = "failed"
-                cand.error = str(exc)[:400]
+                cand.error = _message(exc)[:400]
                 cand.duration_seconds = round(time.perf_counter() - t0, 2)
                 logger.warning(
                     "automl.candidate_failed",
@@ -381,7 +358,7 @@ def execute_automl_run(run_id: str) -> None:
                 outcome="failure",
                 reason="no candidate succeeded",
             )
-            return
+            return FAILED
 
         best = ranked[0]
 
@@ -439,6 +416,7 @@ def execute_automl_run(run_id: str) -> None:
                 "promoted": promotion.get("promoted"),
             },
         )
+        return status
 
     except AutoMLError as exc:
         store.update(
@@ -450,15 +428,28 @@ def execute_automl_run(run_id: str) -> None:
         )
         audit("automl.run_failed", "automl_run", run_id, outcome="failure", error=str(exc))
         logger.warning("automl.run_rejected", extra={"run_id": run_id, "error": str(exc)})
+        return FAILED
     except Exception as exc:
+        if exc.__class__.__name__ == "JobCancelled":
+            raise
         logger.exception("automl.run_failed", extra={"run_id": run_id})
         store.update(
             run_id,
             status=FAILED,
-            error=str(exc)[:500],
+            error=_message(exc)[:500],
             completed_at=_now(),
             duration_seconds=round(time.perf_counter() - started, 2),
         )
         audit(
-            "automl.run_failed", "automl_run", run_id, outcome="failure", error=str(exc)[:200]
+            "automl.run_failed",
+            "automl_run",
+            run_id,
+            outcome="failure",
+            error=_message(exc)[:200],
         )
+        return FAILED
+
+
+def _message(exc: Exception) -> str:
+    """The human sentence of an error, without a platform error's detail dump."""
+    return str(getattr(exc, "message", None) or exc)

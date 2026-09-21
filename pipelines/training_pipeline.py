@@ -20,7 +20,7 @@ import argparse
 import sys
 from typing import Any
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.exceptions import DataValidationError, FMOpsError
 from app.core.logging import configure_from_settings, get_logger
 from app.core.utils import write_json
@@ -41,18 +41,27 @@ def run(
     target_stage: str = "Production",
     compare: bool = True,
     report_path: str | None = None,
+    model_name: str | None = None,
+    settings: Settings | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    settings = get_settings()
+    """Train, and optionally gate, one model version.
+
+    ``settings`` carries a per-run data contract when the model is not the
+    configured reference model; ``model_name`` names the lineage it joins.
+    """
+    settings = settings or get_settings()
     report: dict[str, Any] = {"pipeline": "training", "environment": settings.environment}
 
     try:
         result = train_model(
             TrainingRequest(
+                model_name=model_name,
                 dataset_version=dataset_version,
                 dataset_path=dataset_path,
                 algorithm=algorithm,
                 tune=tune,
-            )
+            ),
+            settings=settings,
         )
     except DataValidationError as exc:
         logger.error(
@@ -77,6 +86,7 @@ def run(
         stage="training",
         status="succeeded",
         run_id=result.run_id,
+        model_name=result.model_name,
         model_version=result.registered_version,
         algorithm=result.algorithm,
         dataset_version=result.dataset_version,
@@ -101,7 +111,7 @@ def run(
         return 0, report
 
     outcome = register_and_promote(
-        result, target_stage=ModelStage(target_stage), compare=compare
+        result, target_stage=ModelStage(target_stage), compare=compare, settings=settings
     )
     report.update(
         stage="approval",

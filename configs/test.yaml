@@ -62,3 +62,11 @@ tracking:
 
 security:
   auth_backend: none
+
+# Execute jobs in the calling thread: deterministic API tests.
+jobs:
+  inline: true
+
+# Tests trigger automation explicitly, never on a timer.
+automation:
+  enabled: false

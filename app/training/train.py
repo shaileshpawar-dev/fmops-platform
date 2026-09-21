@@ -32,6 +32,12 @@ from sklearn.pipeline import Pipeline
 from app.core.config import Settings, get_settings
 from app.core.exceptions import TrainingError
 from app.core.logging import StageTimer, get_logger, log_context
+from app.core.signature import (
+    ModelSignature,
+    SignatureError,
+    build_signature,
+    validate_model_name,
+)
 from app.core.storage import build_artifact_store
 from app.core.utils import git_commit, jsonable, new_id, utcnow_iso, write_json
 from app.data.preprocessing import (
@@ -42,6 +48,7 @@ from app.data.preprocessing import (
 from app.data.validation import validate_or_raise
 from app.data.versioning import build_profile, get_dataset_registry
 from app.registry.base import ModelRegistry
+from app.registry.context import check_lineage_compatible
 from app.registry.factory import get_registry
 from app.schemas.model import (
     EvaluationResult,
@@ -119,7 +126,11 @@ def train_model(
 
     algorithm = request.algorithm or settings.training.algorithm
     experiment_name = request.experiment_name or settings.tracking.experiment_name
-    model_name = settings.tracking.registered_model_name
+    model_name = request.model_name or settings.tracking.registered_model_name
+    try:
+        validate_model_name(model_name)
+    except SignatureError as exc:
+        raise TrainingError(str(exc), model=model_name) from exc
     should_tune = settings.tuning.enabled if request.tune is None else request.tune
     commit = git_commit()
     started = time.perf_counter()
@@ -139,6 +150,27 @@ def train_model(
             )
             version_id = dataset_version.version if dataset_version else None
             dataset_hash = dataset_version.content_hash if dataset_version else None
+
+        # ---------------- 1b. signature ------------------------------------ #
+        # Recorded before validation because the target's two classes have to
+        # be known to validate it at all. From here on the run uses the data
+        # contract rebuilt from the signature, so what is recorded is exactly
+        # what is trained.
+        try:
+            signature = build_signature(frame, settings.data)
+        except SignatureError as exc:
+            raise TrainingError(
+                f"dataset {version_id or 'unregistered'} cannot train a binary "
+                f"classifier: {exc}",
+                dataset_version=version_id,
+            ) from exc
+        settings = settings.model_copy(
+            update={"data": signature.to_data_config(settings.data)}, deep=True
+        )
+        # A name keeps one prediction problem for life; see check_lineage_compatible.
+        check_lineage_compatible(
+            registry, model_name, signature.target, signature.class_labels, signature.task
+        )
 
         # ---------------- 2. validate -------------------------------------- #
         with StageTimer(logger, "validate_data", dataset_version=version_id):
@@ -176,6 +208,7 @@ def train_model(
                 dataset_hash=dataset_hash,
                 commit=commit,
                 validation_passed=validation_report.passed,
+                signature=signature,
             )
             result.duration_seconds = round(time.perf_counter() - started, 3)
             return result
@@ -197,6 +230,7 @@ def _train_within_run(
     dataset_hash: str | None,
     commit: str,
     validation_passed: bool,
+    signature: ModelSignature,
 ) -> TrainingRunResult:
     # ---------------- 3. split --------------------------------------------- #
     with StageTimer(logger, "split_data"):
@@ -337,6 +371,7 @@ def _train_within_run(
             dataset_hash=dataset_hash,
             commit=commit,
             feature_columns=list(features.columns),
+            signature=signature,
         )
         tracker.log_artifact(model_path.parent)
 
@@ -367,6 +402,7 @@ def _train_within_run(
                     "tuned": str(should_tune).lower(),
                     "threshold": f"{threshold:.4f}",
                 },
+                signature=signature.model_dump(mode="json"),
                 description=(
                     f"{algorithm} trained on {dataset_version or 'unregistered data'} "
                     f"({len(X_train)} rows)"
@@ -425,6 +461,7 @@ def _persist_model(
     dataset_hash: str | None,
     commit: str,
     feature_columns: list[str],
+    signature: ModelSignature,
 ) -> tuple[str, Path]:
     """Write the model + its sidecar metadata, then upload to the artifact store.
 
@@ -447,6 +484,7 @@ def _persist_model(
         "dataset_hash": dataset_hash,
         "git_commit": commit,
         "feature_columns": feature_columns,
+        "signature": signature.model_dump(mode="json"),
         "environment": environment_snapshot(),
         "created_at": utcnow_iso(),
     }

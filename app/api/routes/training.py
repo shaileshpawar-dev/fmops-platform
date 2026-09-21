@@ -1,20 +1,20 @@
 """Start and inspect training runs.
 
-Thin by design. The route validates the request, records a run and hands off to
-:func:`app.training.jobs.execute_training_run`, which calls the existing
-training pipeline. No training, evaluation, registration or promotion logic
-lives in this module.
+Thin by design. The route validates the request, records a run and queues a
+``training`` job, which calls the existing training pipeline. No training,
+evaluation, registration or promotion logic lives in this module. See
+:mod:`app.jobs.runner` for how jobs execute.
 
-Runs execute as FastAPI background tasks in the API process -- the mechanism
-``POST /api/v1/retraining/run-async`` already uses. See
-:mod:`app.training.jobs` for what that does and does not guarantee.
+Without a ``target_column`` a run trains the configured reference model on the
+reference contract. With one, it trains a named model on any registered
+dataset, under a data contract derived from that dataset and target.
 """
 
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import get_settings
@@ -81,10 +81,26 @@ class TrainingRunRequest(BaseModel):
         default="Staging",
         description="Stage to promote into if the gate passes. Defaults to Staging.",
     )
+    model_name: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Model this run adds a version to. Needs target_column unless it is "
+        "the reference model.",
+    )
+    target_column: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Column to predict. Omit to train the reference model.",
+    )
+    positive_label: str | None = Field(
+        default=None, max_length=128, description="Which target class is positive."
+    )
 
 
 class TrainingRunAccepted(BaseModel):
     run_id: str
+    job_id: str
+    model_name: str | None = None
     status: str
     poll: str
     detail: str
@@ -98,8 +114,8 @@ class TrainingRunAccepted(BaseModel):
 )
 def start_training_run(
     request: TrainingRunRequest,
-    background: BackgroundTasks,
     response: Response,
+    http: Request,
 ) -> TrainingRunAccepted:
     """Queue a training run and return immediately.
 
@@ -137,7 +153,28 @@ def start_training_run(
                 requested=request.dataset_version,
             )
 
-    from app.training.jobs import execute_training_run, get_training_run_store
+    model_name = request.model_name
+    if request.target_column:
+        # A named user model: fail now, not minutes into the job, if the target
+        # cannot train a binary classifier or does not match the model's lineage.
+        from app.data.contract import resolve_model_name
+        from app.data.versioning import get_dataset_registry
+
+        if not request.dataset_version:
+            raise UnknownDatasetError("a target_column needs an explicit dataset_version")
+        frame = get_dataset_registry().load(request.dataset_version)
+        model_name = resolve_model_name(
+            frame, request.target_column, request.model_name, request.positive_label
+        )
+    elif request.model_name and request.model_name != settings.tracking.registered_model_name:
+        raise UnknownDatasetError(
+            "training a model other than the reference model needs a target_column",
+            model_name=request.model_name,
+        )
+
+    from app.api.security import request_actor
+    from app.jobs.runner import get_job_runner
+    from app.training.jobs import get_training_run_store
 
     run = get_training_run_store().create(
         dataset_version=request.dataset_version,
@@ -145,15 +182,27 @@ def start_training_run(
         tune=request.tune,
         promote=request.promote,
         target_stage=request.target_stage,
+        model_name=model_name,
+        target_column=request.target_column,
+        positive_label=request.positive_label,
+        requested_by=request_actor(http),
     )
-    background.add_task(execute_training_run, run.id)
+    job = get_job_runner().submit(
+        "training",
+        {"run_id": run.id},
+        model_name=model_name,
+        resource_id=run.id,
+        requested_by=request_actor(http),
+    )
 
     response.headers["Location"] = f"/api/v1/training/runs/{run.id}"
     return TrainingRunAccepted(
         run_id=run.id,
+        job_id=job["id"],
+        model_name=model_name,
         status=run.status,
         poll=f"/api/v1/training/runs/{run.id}",
-        detail="training started in the background; poll the run for its status",
+        detail="training queued; poll the run (or its job) for progress and logs",
     )
 
 

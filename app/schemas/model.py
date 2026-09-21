@@ -13,6 +13,10 @@ from app.schemas.common import ModelStage, ModelStatus
 class TrainingRequest(BaseModel):
     """Everything needed to reproduce a training run."""
 
+    # The registered model this run produces a version of. Defaults to the
+    # configured reference model; any other name starts its own lineage, its
+    # own gate comparison and its own serving endpoint.
+    model_name: str | None = None
     dataset_path: str | None = None
     dataset_version: str | None = None
     algorithm: str | None = None
@@ -117,6 +121,10 @@ class ModelVersion(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
     tags: dict[str, str] = Field(default_factory=dict)
     description: str = ""
+    # The input contract this version was trained against; see
+    # app.core.signature. None only for versions registered before signatures
+    # existed, which are all versions of the reference model.
+    signature: dict[str, Any] | None = None
     created_at: str = Field(default_factory=utcnow_iso)
     updated_at: str = Field(default_factory=utcnow_iso)
     created_by: str | None = None

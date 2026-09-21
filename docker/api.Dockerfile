@@ -26,16 +26,23 @@ RUN python -m venv /opt/venv \
 # ---------------------------------------------------------------- runtime ---
 FROM python:3.12-slim-bookworm AS runtime
 
+# The commit this image was built from, reported by /health. Pass it at build
+# time: docker build --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) ...
+ARG GIT_COMMIT=unknown
+
 LABEL org.opencontainers.image.title="fmops-api" \
       org.opencontainers.image.description="FMOps platform API and inference service" \
-      org.opencontainers.image.source="https://github.com/your-org/fmops-platform" \
+      org.opencontainers.image.source="https://github.com/shaileshpawar-dev/fmops-platform" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.licenses="MIT"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     FMOPS_ENV=production \
-    FMOPS_LOG_FORMAT=json
+    FMOPS_LOG_FORMAT=json \
+    FMOPS_GIT_COMMIT=${GIT_COMMIT} \
+    FMOPS_SERVER__WORKERS=1
 
 # curl is used by the container HEALTHCHECK below.
 RUN apt-get update \
@@ -61,10 +68,11 @@ RUN mkdir -p /app/artifacts /app/data \
 USER fmops
 EXPOSE 8000
 
-# Readiness, not liveness: the container is only "healthy" once a model can
-# actually be served, so an orchestrator will not route traffic to it early.
+# Readiness: the database answers and the job worker is alive. A platform with
+# no models yet is still ready -- it must accept uploads and training.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS http://localhost:8000/health/ready || exit 1
 
-ENTRYPOINT ["uvicorn"]
-CMD ["app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--no-access-log"]
+# The worker count comes from FMOPS_SERVER__WORKERS like every other setting;
+# hard-coding it here used to override the configured value silently.
+CMD ["sh", "-c", "exec uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers ${FMOPS_SERVER__WORKERS:-1} --no-access-log"]

@@ -8,7 +8,8 @@ name: CI
 #   quality      format, lint, types
 #   security     dependency audit, static analysis, secret scan
 #   test         unit + integration (fast, every push)
-#   pipeline     end-to-end lifecycle tests (slower; trains real models)
+#   pipeline     end-to-end lifecycle + acceptance tests (slower; trains models)
+#   console      syntax-check every console script (there is no build step)
 #   docker       build all three images and smoke-test the API image
 #   terraform    fmt + validate
 #
@@ -16,9 +17,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [master, main, develop]
   workflow_dispatch:
 
 concurrency:
@@ -168,6 +169,28 @@ jobs:
       # promote -> rollback path, which is the behaviour the platform exists for.
       - name: Lifecycle tests
         run: pytest tests/pipeline -v --durations=10
+
+      # A user's own dataset driven through every lifecycle stage over HTTP.
+      - name: Acceptance tests
+        run: pytest tests/e2e -v --durations=10
+
+  console:
+    name: Console scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # The console ships as plain scripts with no bundler, so a syntax error
+      # would otherwise reach the browser untested.
+      - name: Syntax-check every script
+        run: |
+          set -e
+          for f in $(find app/api/static/js -name '*.js'); do
+            node --check "$f"
+          done
 
   pipeline-smoke:
     name: Pipeline smoke run

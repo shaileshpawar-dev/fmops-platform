@@ -2,11 +2,16 @@
 
 Three distinct checks, because they answer different questions:
 
-``/health``        overall summary for humans and dashboards
-``/health/live``   is the process up? (Kubernetes liveness / ECS health check)
-``/health/ready``  can it actually serve? (readiness -- fails while no model is
-                   loaded, which keeps a starting container out of the load
-                   balancer instead of serving 503s to users)
+``/health``        overall summary for humans and dashboards: every component,
+                   every model, every deployed endpoint
+``/health/live``   is the process up? (liveness)
+``/health/ready``  should this instance receive traffic? (readiness)
+
+Readiness is a property of the *service*, not of any one model. A platform with
+no models yet must still accept uploads and training, so "no model is serving"
+is reported -- per model, in ``/health`` -- but does not take the instance out
+of the load balancer. What does: a database it cannot reach, or a job worker
+that has died, because then work would be accepted and never done.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from app.core.config import get_settings
 from app.core.db import get_database
 from app.core.logging import get_logger
 from app.deployment.manager import get_deployment_manager
+from app.registry.context import endpoint_for
 from app.registry.factory import get_registry
 from app.schemas.common import HealthStatus
 
@@ -34,8 +40,7 @@ def live() -> dict[str, str]:
 
 @router.get("/health/ready", summary="Readiness probe")
 def ready(response: Response) -> dict[str, Any]:
-    """Ready to serve traffic: database reachable and a servable model exists."""
-    settings = get_settings()
+    """Ready to receive traffic: the database answers and jobs can execute."""
     checks: dict[str, bool] = {}
     detail: dict[str, Any] = {}
 
@@ -46,18 +51,22 @@ def ready(response: Response) -> dict[str, Any]:
         checks["database"] = False
         detail["database_error"] = str(exc)
 
+    runner = _job_runner_state()
+    checks["job_worker"] = runner["alive"]
+    if not runner["alive"]:
+        detail["job_worker_error"] = runner["detail"]
+
     try:
-        registry = get_registry()
-        serving = registry.get_serving(settings.tracking.registered_model_name)
-        checks["model_available"] = serving is not None
-        if serving is not None:
-            detail["model_version"] = serving.version
-            detail["model_stage"] = serving.stage.value
-        else:
-            detail["model_error"] = "no Production or Staging model version is registered"
-    except Exception as exc:
-        checks["model_available"] = False
-        detail["model_error"] = str(exc)
+        models = get_registry().list_models()
+        serving = [
+            m["name"]
+            for m in models
+            if m.get("production_version") or m.get("staging_version")
+        ]
+        detail["models_registered"] = len(models)
+        detail["models_serving"] = len(serving)
+    except Exception as exc:  # informational only
+        detail["models_error"] = str(exc)
 
     ok = all(checks.values())
     if not ok:
@@ -75,6 +84,7 @@ def health() -> dict[str, Any]:
         "environment": settings.environment,
         "git_commit": settings.git_commit,
         "components": {},
+        "models": [],
     }
 
     try:
@@ -86,38 +96,66 @@ def health() -> dict[str, Any]:
         payload["status"] = "degraded"
         payload["components"]["database"] = {"status": "error", "detail": str(exc)}
 
+    runner = _job_runner_state()
+    payload["components"]["jobs"] = {
+        "status": "ok" if runner["alive"] else "error",
+        **runner,
+    }
+    if not runner["alive"]:
+        payload["status"] = "degraded"
+
     try:
         registry = get_registry()
-        model_name = settings.tracking.registered_model_name
-        serving = registry.get_serving(model_name)
-        payload["components"]["registry"] = {
+        manager = get_deployment_manager()
+        payload["components"]["registry"] = {"status": "ok", "backend": registry.backend}
+        payload["components"]["deployment"] = {
             "status": "ok",
-            "backend": registry.backend,
-            "model_name": model_name,
-            "serving_version": serving.version if serving else None,
-            "serving_stage": serving.stage.value if serving else None,
+            "provider": manager.provider.name,
         }
-        if serving is None:
-            payload["status"] = "degraded"
+        for model in registry.list_models():
+            name = model["name"]
+            endpoint = endpoint_for(name, settings)
+            serving = registry.get_serving(name)
+            deployment = manager.status(endpoint)
+            entry: dict[str, Any] = {
+                "name": name,
+                "endpoint": endpoint,
+                "serving_version": serving.version if serving else None,
+                "serving_stage": serving.stage.value if serving else None,
+                "deployment_state": deployment.state.value if deployment else None,
+                "endpoint_health": None,
+            }
+            if deployment is not None:
+                endpoint_health = manager.health(endpoint)
+                entry["endpoint_health"] = endpoint_health.status.value
+                # Only a deployed endpoint that is unhealthy degrades the
+                # service; a model nobody has deployed yet is not a fault.
+                if endpoint_health.status == HealthStatus.UNHEALTHY:
+                    payload["status"] = "degraded"
+                    payload["components"]["deployment"]["status"] = "degraded"
+            payload["models"].append(entry)
     except Exception as exc:
         payload["status"] = "degraded"
         payload["components"]["registry"] = {"status": "error", "detail": str(exc)}
 
-    try:
-        manager = get_deployment_manager()
-        endpoint_health = manager.health()
-        deployment = manager.status()
-        payload["components"]["deployment"] = {
-            "status": endpoint_health.status.value,
-            "endpoint": endpoint_health.endpoint_name,
-            "provider": manager.provider.name,
-            "checks": endpoint_health.checks,
-            "current_version": deployment.current_version if deployment else None,
-            "state": deployment.state.value if deployment else None,
-        }
-        if endpoint_health.status == HealthStatus.UNHEALTHY and deployment is not None:
-            payload["status"] = "degraded"
-    except Exception as exc:
-        payload["components"]["deployment"] = {"status": "unknown", "detail": str(exc)}
-
     return payload
+
+
+def _job_runner_state() -> dict[str, Any]:
+    from app.jobs.runner import get_job_runner
+    from app.jobs.store import get_job_store
+
+    runner = get_job_runner()
+    inline = runner.config.inline
+    alive = inline or runner.threads_alive()
+    try:
+        counts = get_job_store().counts()
+    except Exception:
+        counts = {}
+    return {
+        "alive": alive,
+        "mode": "inline" if inline else "worker",
+        "max_running": runner.config.max_running,
+        "counts": counts,
+        "detail": None if alive else "the job worker thread is not running",
+    }

@@ -52,6 +52,7 @@ class LocalModelRegistry(ModelRegistry):
         tags: dict[str, str] | None = None,
         description: str = "",
         created_by: str | None = None,
+        signature: dict[str, Any] | None = None,
     ) -> ModelVersion:
         now = utcnow_iso()
         with self.db.transaction() as conn:
@@ -63,8 +64,8 @@ class LocalModelRegistry(ModelRegistry):
             conn.execute(
                 "INSERT INTO model_versions (name, version, stage, status, run_id, "
                 "artifact_uri, dataset_version, dataset_hash, git_commit, algorithm, "
-                "params, metrics, tags, description, created_at, updated_at, created_by) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "params, metrics, tags, description, created_at, updated_at, created_by, "
+                "signature) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     name,
                     version,
@@ -83,6 +84,7 @@ class LocalModelRegistry(ModelRegistry):
                     now,
                     now,
                     created_by or "system",
+                    dumps(signature) if signature else None,
                 ),
             )
             conn.execute(
@@ -321,6 +323,7 @@ def _to_model(row) -> ModelVersion:
     for field in _JSON_FIELDS:
         data[field] = loads(data.get(field), {})
     data.pop("id", None)
+    data["signature"] = loads(data.get("signature"), None) if data.get("signature") else None
     data["stage"] = ModelStage(data["stage"])
     data["status"] = ModelStatus(data["status"])
     return ModelVersion(**data)

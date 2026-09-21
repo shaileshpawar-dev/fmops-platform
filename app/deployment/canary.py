@@ -95,7 +95,14 @@ class CanaryStrategy(Strategy):
                 return self._abort(ctx, results, "endpoint became unhealthy during canary")
 
             if percent < 100:
-                self._sleep(max(0, ctx.config.canary_step_seconds))
+                try:
+                    self._sleep(max(0, ctx.config.canary_step_seconds))
+                except BaseException as exc:
+                    # Cancelled (or interrupted) mid-rollout: never leave traffic
+                    # split. Restore the live version, then let the caller see
+                    # the interruption.
+                    self._interrupt(ctx, percent, exc)
+                    raise
 
             step = self._observe(ctx, index, percent)
             results.append(step)
@@ -224,6 +231,48 @@ class CanaryStrategy(Strategy):
             latency_p95_ms=latency_p95,
             passed=True,
             reason="within error-rate and latency budgets",
+        )
+
+    def _interrupt(self, ctx: StrategyContext, percent: int, exc: BaseException) -> None:
+        """Put all traffic back on the live version after an interrupted step.
+
+        Unlike a failed step this ignores ``auto_rollback``: a cancellation is
+        an operator saying stop, and a half-shifted endpoint is never the state
+        they asked for.
+        """
+        store = ctx.store
+        endpoint = ctx.deployment.endpoint_name
+        reason = f"rollout interrupted at {percent}% traffic: {exc}"
+        if ctx.current_version is None:
+            store.update(ctx.deployment.id, state=DeploymentState.FAILED, message=reason)
+            store.add_event(ctx.deployment.id, "canary.interrupted", {"reason": reason})
+            return
+        try:
+            ctx.provider.apply(
+                endpoint,
+                ctx.model_name,
+                TrafficSplit.all_to(ctx.current_version),
+                metadata=ctx.metadata,
+            )
+        except Exception as restore_exc:
+            store.update(
+                ctx.deployment.id,
+                state=DeploymentState.FAILED,
+                health=HealthStatus.UNHEALTHY,
+                message=f"{reason}; restoring v{ctx.current_version} ALSO failed: {restore_exc}",
+            )
+            return
+        store.update(
+            ctx.deployment.id,
+            state=DeploymentState.ROLLED_BACK,
+            traffic=TrafficSplit.all_to(ctx.current_version).as_dict(),
+            candidate_version=None,
+            message=f"{reason}; all traffic restored to v{ctx.current_version}",
+        )
+        store.add_event(
+            ctx.deployment.id,
+            "canary.interrupted",
+            {"reason": reason, "restored_version": ctx.current_version},
         )
 
     def _abort(

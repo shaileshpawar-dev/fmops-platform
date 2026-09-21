@@ -19,9 +19,10 @@ from typing import Any
 
 from sklearn.pipeline import Pipeline
 
-from app.core.config import Settings, get_settings
+from app.core.config import DataConfig, Settings, get_settings
 from app.core.exceptions import ModelNotLoadedError
 from app.core.logging import get_logger
+from app.core.signature import ModelSignature
 from app.core.storage import resolve_uri_to_local
 from app.core.utils import read_json, utcnow_iso
 from app.registry.base import ModelRegistry
@@ -29,6 +30,26 @@ from app.registry.factory import get_registry
 from app.schemas.model import ModelVersion
 
 logger = get_logger(__name__)
+
+
+# Warm-up input for pre-signature versions of the reference model only. Every
+# other version warms up with its own signature's example.
+_REFERENCE_SAMPLE: dict[str, Any] = {
+    "age": 40.0,
+    "annual_income": 60000.0,
+    "loan_amount": 15000.0,
+    "loan_term_months": 36,
+    "credit_score": 700.0,
+    "debt_to_income": 0.25,
+    "employment_years": 5.0,
+    "num_credit_lines": 5,
+    "num_late_payments_12m": 0,
+    "credit_utilization": 0.3,
+    "employment_type": "salaried",
+    "housing_status": "own",
+    "loan_purpose": "auto",
+    "region": "north",
+}
 
 
 @dataclass
@@ -47,11 +68,21 @@ class LoadedModel:
     metrics: dict[str, float] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
     feature_columns: list[str] = field(default_factory=list)
+    # The input contract this version was trained against, and the data config
+    # rebuilt from it. ``signature`` is None only for pre-signature versions of
+    # the reference model, whose contract is the configured one.
+    signature: ModelSignature | None = None
+    data_config: DataConfig | None = None
     loaded_at: str = field(default_factory=utcnow_iso)
 
     @property
     def key(self) -> str:
         return f"{self.model_name}:{self.version}"
+
+    def label_for(self, prediction: int) -> str:
+        if self.signature is not None:
+            return self.signature.label_for(prediction)
+        return "default" if int(prediction) == 1 else "no_default"
 
 
 class ModelCache:
@@ -114,6 +145,17 @@ class ModelCache:
         threshold = float(
             metadata.get("threshold") or model_version.params.get("threshold") or 0.5
         )
+        # The sidecar travels with the artifact and is authoritative; the
+        # registry copy covers artifacts whose sidecar was not fetched.
+        raw_signature = metadata.get("signature") or model_version.signature
+        signature = ModelSignature.model_validate(raw_signature) if raw_signature else None
+        from app.registry.context import data_config_for
+
+        data_config = (
+            signature.to_data_config(self.settings.data)
+            if signature is not None
+            else data_config_for(model_version, self.settings)
+        )
 
         loaded = LoadedModel(
             model_name=model_name,
@@ -128,6 +170,8 @@ class ModelCache:
             metrics=model_version.metrics,
             params=model_version.params,
             feature_columns=metadata.get("feature_columns", []),
+            signature=signature,
+            data_config=data_config,
         )
         logger.info(
             "model_cache.loaded",
@@ -190,28 +234,18 @@ class ModelCache:
 
         started = time.perf_counter()
         try:
-            sample = {
-                "age": 40.0,
-                "annual_income": 60000.0,
-                "loan_amount": 15000.0,
-                "loan_term_months": 36,
-                "credit_score": 700.0,
-                "debt_to_income": 0.25,
-                "employment_years": 5.0,
-                "num_credit_lines": 5,
-                "num_late_payments_12m": 0,
-                "credit_utilization": 0.3,
-                "employment_type": "salaried",
-                "housing_status": "own",
-                "loan_purpose": "auto",
-                "region": "north",
-            }
-            frame = prepare_inference_frame([sample], self.settings.data)
+            sample = (
+                loaded.signature.example()
+                if loaded.signature is not None
+                else _REFERENCE_SAMPLE
+            )
+            frame = prepare_inference_frame([sample], loaded.data_config or self.settings.data)
             loaded.pipeline.predict_proba(frame)
         except Exception as exc:
-            # A failed warm-up is not fatal; the model may simply expect a
-            # different schema. It is logged so it is not invisible.
-            logger.warning(
+            # A failed warm-up is not fatal to the process, but for a version
+            # with a recorded signature it means the model cannot score its own
+            # training medians -- worth an error, not a shrug.
+            logger.error(
                 "model_cache.warmup_failed",
                 extra={"model_key": loaded.key, "error": str(exc)},
             )

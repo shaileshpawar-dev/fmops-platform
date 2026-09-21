@@ -20,6 +20,7 @@ from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardSc
 
 from app.core.config import DataConfig, get_settings
 from app.core.logging import get_logger
+from app.core.signature import encode_target, stringify_label
 
 logger = get_logger(__name__)
 
@@ -79,12 +80,30 @@ def engineer_features(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def categories_as_text(frame: pd.DataFrame) -> pd.DataFrame:
+    """Categorical inputs in the text form the signature records. Missing stays missing."""
+    out = pd.DataFrame(frame).copy()
+    for column in out.columns:
+        out[column] = (
+            out[column]
+            .map(lambda v: np.nan if pd.isna(v) else stringify_label(v).strip())
+            .astype(object)
+        )
+    return out
+
+
 def build_preprocessor(
     data_config: DataConfig | None = None,
 ) -> tuple[ColumnTransformer, list[str], list[str]]:
-    """Build the ColumnTransformer plus the numeric/categorical column lists."""
+    """Build the ColumnTransformer plus the numeric/categorical column lists.
+
+    The loan-specific derived ratios exist only for the reference contract. A
+    user dataset is preprocessed from its own columns and nothing else -- the
+    engineered loan features would be all-NaN there at best.
+    """
     cfg = data_config or get_settings().data
-    numeric = [*cfg.numeric_features, *DERIVED_FEATURES]
+    derived = DERIVED_FEATURES if uses_reference_engineering(cfg) else ()
+    numeric = [*cfg.numeric_features, *derived]
     categorical = list(cfg.categorical_features)
 
     numeric_pipeline = Pipeline(
@@ -95,6 +114,16 @@ def build_preprocessor(
     )
     categorical_pipeline = Pipeline(
         steps=[
+            # Categories are compared as text, exactly as the serving contract
+            # sends them. Without this a column of integer codes or booleans is
+            # fitted on 3/True and served "3"/"true", every served value encodes
+            # as unknown, and predictions are silently wrong.
+            (
+                "as_text",
+                FunctionTransformer(
+                    categories_as_text, validate=False, feature_names_out="one-to-one"
+                ),
+            ),
             ("impute", SimpleImputer(strategy="most_frequent")),
             # Unknown categories at serving time must not explode -- they encode
             # to all-zeros. This is why a *new* category shows up as drift
@@ -120,7 +149,10 @@ def build_feature_pipeline(data_config: DataConfig | None = None) -> Pipeline:
     function separate means the same feature stack is reused by every algorithm
     and by the drift reference profile.
     """
-    transformer, _, _ = build_preprocessor(data_config)
+    cfg = data_config or get_settings().data
+    transformer, _, _ = build_preprocessor(cfg)
+    if not uses_reference_engineering(cfg):
+        return Pipeline(steps=[("preprocess", transformer)])
     return Pipeline(
         steps=[
             (
@@ -130,6 +162,11 @@ def build_feature_pipeline(data_config: DataConfig | None = None) -> Pipeline:
             ("preprocess", transformer),
         ]
     )
+
+
+def uses_reference_engineering(data_config: DataConfig) -> bool:
+    """Whether the loan domain features apply to this contract."""
+    return data_config.contract == "loan_reference"
 
 
 def split_features_target(
@@ -143,9 +180,21 @@ def split_features_target(
     cfg = data_config or get_settings().data
     if cfg.target_column not in frame.columns:
         raise KeyError(f"target column {cfg.target_column!r} not present")
+    unlabelled = frame[cfg.target_column].isna()
+    if unlabelled.any():
+        # A row without a label cannot be learned from. Validation reports the
+        # fraction; here the rows are dropped and the count is logged.
+        logger.warning(
+            "preprocessing.unlabelled_rows_dropped",
+            extra={"rows": int(unlabelled.sum()), "target": cfg.target_column},
+        )
+        frame = frame.loc[~unlabelled]
     drop = [cfg.target_column, cfg.id_column, cfg.timestamp_column]
     features = frame.drop(columns=[c for c in drop if c in frame.columns])
-    target = pd.to_numeric(frame[cfg.target_column], errors="coerce").astype(int)
+    # Encoded through the recorded class labels, so a "yes"/"no" target trains
+    # rather than failing a numeric cast. Unknown values raise instead of
+    # silently becoming a class.
+    target = encode_target(frame[cfg.target_column], cfg.class_labels)
     return features, target
 
 

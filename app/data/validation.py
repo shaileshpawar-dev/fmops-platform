@@ -55,12 +55,79 @@ class ColumnSpec:
 def build_schema(
     data_config: DataConfig | None = None,
 ) -> dict[str, ColumnSpec]:
+    """The schema a dataset is validated against, chosen by its contract.
+
+    The reference dataset has a declared schema with domain ranges and allowed
+    categories. A user dataset does not, and this function does not pretend to
+    know its domain: it is checked for what can be checked without one.
+    """
+    cfg = data_config or get_settings().data
+    if cfg.contract == "loan_reference":
+        return _reference_schema(cfg)
+    return _inferred_schema(cfg)
+
+
+def _inferred_schema(cfg: DataConfig) -> dict[str, ColumnSpec]:
+    """Presence, type, missingness and a usable target -- and nothing invented.
+
+    The identifier and timestamp columns are optional: the profiler names them
+    when it finds them, and the defaults it falls back to may not exist in the
+    frame at all.
+    """
+    specs = [
+        ColumnSpec(cfg.id_column, "string", required=False, unique=True),
+        ColumnSpec(cfg.timestamp_column, "date", required=False),
+        *(ColumnSpec(name, "numeric") for name in cfg.numeric_features),
+        *(ColumnSpec(name, "categorical") for name in cfg.categorical_features),
+    ]
+    if cfg.target_column:
+        if cfg.class_labels:
+            specs.append(
+                ColumnSpec(
+                    cfg.target_column,
+                    "categorical",
+                    allowed_values=tuple(str(v) for v in cfg.class_labels),
+                )
+            )
+        else:
+            specs.append(ColumnSpec(cfg.target_column, "integer", minimum=0, maximum=1))
+    return {spec.name: spec for spec in specs if spec.name}
+
+
+def dataset_contract(frame: pd.DataFrame, settings: Settings | None = None) -> DataConfig:
+    """The contract to validate a dataset under before anyone has chosen a target.
+
+    The reference dataset is recognised by carrying every declared column; any
+    other dataset is described by its own columns, typed by dtype, with no
+    target -- so no class checks run until a target is chosen.
+    """
+    settings = settings or get_settings()
+    reference = settings.data
+    if set(reference.feature_columns + [reference.target_column]) <= set(frame.columns):
+        return reference
+    numeric = [str(c) for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
+    categorical = [str(c) for c in frame.columns if str(c) not in numeric]
+    return reference.model_copy(
+        update={
+            "contract": "inferred",
+            "class_labels": None,
+            "dataset_name": "uploaded",
+            "target_column": "",
+            "id_column": "",
+            "timestamp_column": "",
+            "numeric_features": numeric,
+            "categorical_features": categorical,
+        },
+        deep=True,
+    )
+
+
+def _reference_schema(cfg: DataConfig) -> dict[str, ColumnSpec]:
     """The declared schema for the reference loan-default dataset.
 
     Ranges mirror the pydantic constraints on the inference request schema, so
     an input rejected at training time is also rejected at serving time.
     """
-    cfg = data_config or get_settings().data
     specs = [
         ColumnSpec(cfg.id_column, "string", unique=True),
         ColumnSpec(cfg.timestamp_column, "date"),
@@ -394,9 +461,16 @@ class NativeValidationEngine(ValidationEngine):
 
     def _check_class_balance(self, frame: pd.DataFrame) -> list[ExpectationResult]:
         target = self.data_config.target_column
-        if target not in frame:
+        if not target or target not in frame:
             return []
-        series = pd.to_numeric(frame[target], errors="coerce").dropna()
+        labels = self.data_config.class_labels
+        if labels:
+            # Named classes ("yes"/"no"): encode through the recorded labels.
+            # Anything outside them is a failed binary check, not a coercion.
+            mapping = {str(labels[0]): 0, str(labels[1]): 1}
+            series = frame[target].dropna().map(lambda v: mapping.get(str(v), -1))
+        else:
+            series = pd.to_numeric(frame[target], errors="coerce").dropna()
         if series.empty:
             return [
                 ExpectationResult(
@@ -680,6 +754,46 @@ def validate_dataframe(
         dataset_name or settings.data.dataset_name,
         dataset_version,
     )
+
+
+def validate_dataset(
+    frame: pd.DataFrame,
+    dataset_version: str | None = None,
+    target: str | None = None,
+    settings: Settings | None = None,
+) -> ValidationReport:
+    """Validate a registered dataset under its own contract.
+
+    Without a target this is a dataset-quality check: shape, types, missingness
+    and duplicates. With one it adds what training will enforce on that target
+    -- two classes, a sane balance -- so "passed" here means the same thing it
+    means to the training pipeline.
+    """
+    from app.core.signature import SignatureError, resolve_class_labels
+
+    settings = settings or get_settings()
+    cfg = dataset_contract(frame, settings)
+    if target and cfg.contract == "inferred":
+        if target not in frame.columns:
+            raise DataValidationError(
+                f"target column {target!r} is not in this dataset",
+                dataset_version=dataset_version,
+            )
+        try:
+            labels, _ = resolve_class_labels(frame[target])
+        except SignatureError:
+            labels = None  # the binary-target check below reports why
+        cfg = cfg.model_copy(
+            update={
+                "target_column": target,
+                "class_labels": None if labels in (None, ["0", "1"]) else labels,
+                "numeric_features": [c for c in cfg.numeric_features if c != target],
+                "categorical_features": [c for c in cfg.categorical_features if c != target],
+            },
+            deep=True,
+        )
+    scoped = settings.model_copy(update={"data": cfg}, deep=True)
+    return validate_dataframe(frame, cfg.dataset_name, dataset_version, scoped)
 
 
 def validate_or_raise(

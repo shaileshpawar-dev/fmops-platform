@@ -76,16 +76,26 @@ class RetrainingTriggerEvaluator:
         return self._db
 
     def evaluate(
-        self, force: bool = False, live_performance: LivePerformance | None = None
+        self,
+        force: bool = False,
+        live_performance: LivePerformance | None = None,
+        model_name: str | None = None,
     ) -> TriggerDecision:
-        """Evaluate every configured trigger.
+        """Evaluate every configured trigger for one model.
 
         ``live_performance`` lets a caller that has already computed it for this
         model version reuse it instead of paying for the join and the metrics a
         second time. The decision is identical either way.
+
+        An automatic trigger firing is necessary but not sufficient: retraining
+        on exactly the data the serving version was trained on cannot fix drift
+        or degradation, so without new labelled rows the decision is to skip,
+        with that reason. A manual (forced) run is the operator's call.
         """
+        from app.registry.context import default_model_name
+
         config = self.settings.retraining
-        model_name = self.settings.tracking.registered_model_name
+        model_name = model_name or default_model_name(self.settings)
         checks: list[dict[str, Any]] = []
 
         if force:
@@ -103,13 +113,13 @@ class RetrainingTriggerEvaluator:
                 checks=checks,
             )
 
-        in_cooldown, last_at = self._in_cooldown()
+        in_cooldown, last_at = self._in_cooldown(model_name)
         if in_cooldown:
             return TriggerDecision(
                 should_retrain=False,
                 reason=(
-                    f"a retraining event ran at {last_at}; automatic triggers are "
-                    f"suppressed for {config.cooldown_minutes} minutes"
+                    f"a retraining event for {model_name} ran at {last_at}; automatic "
+                    f"triggers are suppressed for {config.cooldown_minutes} minutes"
                 ),
                 suppressed_by_cooldown=True,
                 checks=checks,
@@ -171,15 +181,19 @@ class RetrainingTriggerEvaluator:
             if decision[1] is not None and fired is None:
                 fired = decision[1]
 
-        # --- volume ----------------------------------------------------------- #
+        # --- new labelled data ----------------------------------------------- #
+        # Unlabelled traffic cannot be trained on, so it is not "new data" here.
+        new_labelled = self._new_labelled_rows(model_name)
         if "volume" in config.triggers:
-            new_rows = get_inference_log().count(model_name)
-            hit = new_rows >= config.min_new_samples
+            hit = new_labelled >= config.min_new_samples
             checks.append(
                 {
                     "name": "volume",
                     "fired": hit,
-                    "detail": f"{new_rows} logged predictions vs minimum {config.min_new_samples}",
+                    "detail": (
+                        f"{new_labelled} new labelled production rows since the serving "
+                        f"version was trained (minimum {config.min_new_samples})"
+                    ),
                 }
             )
             if hit and fired is None:
@@ -187,11 +201,31 @@ class RetrainingTriggerEvaluator:
                     should_retrain=True,
                     trigger=RetrainingTrigger.VOLUME,
                     reason=(
-                        f"{new_rows} new production samples accumulated "
+                        f"{new_labelled} new labelled production rows accumulated "
                         f"(threshold {config.min_new_samples})"
                     ),
-                    evidence={"new_samples": new_rows},
+                    evidence={"new_labelled_rows": new_labelled},
                 )
+
+        if fired is not None and new_labelled == 0:
+            checks.append(
+                {
+                    "name": "new_data",
+                    "fired": False,
+                    "detail": "no labelled production rows since the serving version was trained",
+                }
+            )
+            return TriggerDecision(
+                should_retrain=False,
+                reason=(
+                    f"{fired.trigger.value if fired.trigger else 'a'} trigger fired, but there "
+                    "is no new labelled data to learn from: retraining on the serving "
+                    "version's own training set cannot correct it. Submit outcomes via "
+                    "POST /api/v1/feedback, or retrain manually with a new dataset version."
+                ),
+                checks=checks,
+                evidence={**fired.evidence, "blocked_by": "no_new_labelled_data"},
+            )
 
         if fired is not None:
             fired.checks = checks
@@ -277,16 +311,37 @@ class RetrainingTriggerEvaluator:
             ),
         )
 
-    def _in_cooldown(self) -> tuple[bool, str | None]:
+    def _in_cooldown(self, model_name: str) -> tuple[bool, str | None]:
         minutes = self.settings.retraining.cooldown_minutes
         if minutes <= 0:
             return False, None
         row = self.db.query_one(
-            "SELECT created_at FROM retraining_events WHERE created_at >= ? "
-            "AND status != ? ORDER BY created_at DESC LIMIT 1",
-            (iso_minutes_ago(minutes), RetrainingStatus.SKIPPED.value),
+            "SELECT created_at FROM retraining_events WHERE model_name = ? "
+            "AND created_at >= ? AND status != ? ORDER BY created_at DESC LIMIT 1",
+            (model_name, iso_minutes_ago(minutes), RetrainingStatus.SKIPPED.value),
         )
         return (row is not None), (row["created_at"] if row else None)
+
+    def _new_labelled_rows(self, model_name: str) -> int:
+        """Labelled rows no model of this lineage has learned from yet.
+
+        Two conditions: the prediction was served after the serving version was
+        trained (so it was not in that version's data), and its label arrived
+        after the last retraining attempt (which trains on every label that
+        existed when it ran -- promoted or not). Without the second, a rejected
+        candidate would leave the same labels looking new, and every pass would
+        retrain on identical data forever.
+        """
+        serving = get_registry().get_serving(model_name)
+        since = serving.created_at if serving else None
+        last_attempt = self.db.scalar(
+            "SELECT MAX(created_at) FROM retraining_events WHERE model_name = ? AND status != ?",
+            (model_name, RetrainingStatus.SKIPPED.value),
+            None,
+        )
+        return get_inference_log().labelled_count(
+            model_name, since=since, feedback_since=last_attempt
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -372,10 +427,17 @@ class RetrainingEventStore:
         row = self.db.query_one("SELECT * FROM retraining_events WHERE id = ?", (event_id,))
         return _to_event(row) if row else None
 
-    def recent(self, limit: int = 25) -> list[RetrainingEvent]:
-        rows = self.db.query(
-            "SELECT * FROM retraining_events ORDER BY created_at DESC LIMIT ?", (limit,)
-        )
+    def recent(self, limit: int = 25, model_name: str | None = None) -> list[RetrainingEvent]:
+        if model_name:
+            rows = self.db.query(
+                "SELECT * FROM retraining_events WHERE model_name = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (model_name, limit),
+            )
+        else:
+            rows = self.db.query(
+                "SELECT * FROM retraining_events ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
         return [_to_event(row) for row in rows]
 
 
@@ -398,6 +460,8 @@ def get_event_store() -> RetrainingEventStore:
 
 
 def evaluate_trigger(
-    force: bool = False, live_performance: LivePerformance | None = None
+    force: bool = False,
+    live_performance: LivePerformance | None = None,
+    model_name: str | None = None,
 ) -> TriggerDecision:
-    return RetrainingTriggerEvaluator().evaluate(force, live_performance)
+    return RetrainingTriggerEvaluator().evaluate(force, live_performance, model_name)

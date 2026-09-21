@@ -92,6 +92,7 @@ class ModelRegistry(ABC):
         tags: dict[str, str] | None = None,
         description: str = "",
         created_by: str | None = None,
+        signature: dict[str, Any] | None = None,
     ) -> ModelVersion: ...
 
     @abstractmethod

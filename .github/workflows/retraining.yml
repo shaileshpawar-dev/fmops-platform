@@ -1,10 +1,14 @@
 name: Scheduled retraining
 
-# Automated retraining.
+# Manual retraining, from CI.
 #
-# Runs on a schedule and evaluates the triggers. It only trains when a trigger
-# actually fires (drift, measured performance degradation, or new-data volume),
-# so a healthy model costs one cheap check rather than a full retraining run.
+# Scheduled checks do not live here. The running service evaluates every
+# model's drift and retraining triggers itself on a timer (app/jobs/automation.py),
+# against its own state. A workflow on a fresh runner has no state of its own:
+# it can only evaluate something when the deployment keeps its registry and
+# data in shared storage (S3 + a remote MLflow) and this repository is given
+# access to it (vars.AWS_ROLE_ARN). Without that it stops and says so, instead
+# of "evaluating" an empty checkout and reporting a meaningless green.
 #
 # The important property: this workflow can NOT push a worse model to
 # production. The retraining pipeline compares the candidate against the
@@ -13,9 +17,6 @@ name: Scheduled retraining
 # outcome -- it must not page anyone.
 
 on:
-  schedule:
-    # 03:00 UTC every Monday. Keep in sync with retraining.schedule_cron.
-    - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
       force:
@@ -71,6 +72,14 @@ jobs:
           else
             echo "aws_configured=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Stop without shared state
+        if: steps.check.outputs.aws_configured != 'true'
+        run: |
+          echo "::error::No shared state is configured (vars.AWS_ROLE_ARN is unset)."
+          echo "A fresh runner has no registry, data or traffic to evaluate. The running"
+          echo "service evaluates its own retraining triggers on a timer instead."
+          exit 1
 
       - name: Install
         run: |

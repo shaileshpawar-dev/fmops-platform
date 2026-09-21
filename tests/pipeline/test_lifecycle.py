@@ -262,6 +262,33 @@ def test_clean_traffic_does_not_trigger_drift(platform, valid_frame):
 
 
 def test_drift_fires_the_retraining_trigger(platform, drifted_frame):
+    """Drift plus labelled production rows: there is something new to learn from."""
+    from app.monitoring.service import MonitoringService
+    from app.retraining.trigger import evaluate_trigger
+
+    run = _train(platform)
+    _promote(platform, run)
+    platform["manager"].deploy(
+        DeploymentRequest(
+            model_version=run.registered_version, strategy=DeploymentStrategy.DIRECT
+        )
+    )
+    _send_traffic(platform, drifted_frame.head(400), label_fraction=0.5)
+    MonitoringService(platform["settings"], platform["registry"]).run_drift_scan()
+
+    decision = evaluate_trigger()
+    assert decision.should_retrain
+    assert decision.trigger.value == "drift"
+    assert decision.evidence["drifted_features"]
+
+
+def test_drift_without_new_labels_does_not_retrain(platform, drifted_frame):
+    """Drift alone is detected and reported, but does not start a retrain.
+
+    Retraining on exactly the data the serving version was trained on cannot
+    correct drift. The platform used to paper over that by appending generated
+    rows; now it says what is missing instead.
+    """
     from app.monitoring.service import MonitoringService
     from app.retraining.trigger import evaluate_trigger
 
@@ -276,9 +303,11 @@ def test_drift_fires_the_retraining_trigger(platform, drifted_frame):
     MonitoringService(platform["settings"], platform["registry"]).run_drift_scan()
 
     decision = evaluate_trigger()
-    assert decision.should_retrain
-    assert decision.trigger.value == "drift"
-    assert decision.evidence["drifted_features"]
+    assert not decision.should_retrain
+    assert "no new labelled data" in decision.reason
+    assert decision.evidence["blocked_by"] == "no_new_labelled_data"
+    drift_check = next(c for c in decision.checks if c["name"] == "drift")
+    assert drift_check["fired"], "the drift itself must still be detected and shown"
 
 
 def test_no_trigger_without_evidence(platform):
@@ -353,20 +382,35 @@ def test_worse_candidate_is_rejected_and_production_is_untouched(platform):
     assert candidate.stage == ModelStage.DEVELOPMENT
 
 
-def test_better_candidate_is_promoted_and_deployed(platform):
+def test_better_candidate_is_promoted_and_deployed(platform, monkeypatch):
+    """Given a comparison the candidate wins, it is promoted and goes live.
+
+    This isolates the promotion path from run-to-run training noise. It used to
+    do so by overwriting the incumbent's recorded metric -- which no longer
+    decides anything: both models are now re-scored on a shared holdout, so a
+    forged number cannot make a candidate win. The comparison is stubbed here
+    instead, and is itself tested against real models in tests/e2e and
+    tests/unit/test_holdout.py.
+    """
+    import app.retraining.pipeline as pipeline_module
     from app.retraining.pipeline import RetrainingPipeline
+    from app.training.approval import compare_to_production
 
     run = _train(platform)
     _promote(platform, run)
     registry = platform["registry"]
     name = platform["settings"].tracking.registered_model_name
 
-    # Make the incumbent look weak so any reasonable candidate beats it. This
-    # isolates the promotion path from run-to-run training noise.
-    registry.db.execute(
-        "UPDATE model_versions SET metrics = ? WHERE name = ? AND version = ?",
-        ('{"roc_auc": 0.55, "f1": 0.40}', name, run.registered_version),
-    )
+    def candidate_wins(candidate, incumbent, settings=None):
+        return compare_to_production(
+            candidate.metrics,
+            {"roc_auc": 0.55, "f1": 0.40},
+            candidate_version=candidate.version,
+            baseline_version=incumbent.version if incumbent else None,
+            settings=settings,
+        )
+
+    monkeypatch.setattr(pipeline_module, "compare_on_shared_holdout", candidate_wins)
 
     pipeline = RetrainingPipeline(
         settings=platform["settings"],

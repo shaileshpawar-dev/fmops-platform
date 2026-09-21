@@ -52,6 +52,39 @@ class PredictionRequest(BaseModel):
     explain: bool = False
 
 
+class ModelPredictionRequest(BaseModel):
+    """Score one record with any registered model.
+
+    ``features`` is checked against the serving version's recorded signature,
+    not against a static schema: the contract is whatever the model was
+    trained on. See ``GET /api/v1/models/{name}/signature``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    features: dict[str, Any]
+    model_version: int | None = Field(
+        default=None, description="Pin a version; defaults to the model's live routing."
+    )
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    explain: bool = False
+
+
+class ModelBatchPredictionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    instances: list[dict[str, Any]]
+    model_version: int | None = None
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @field_validator("instances")
+    @classmethod
+    def _not_empty(cls, value: list) -> list:
+        if not value:
+            raise ValueError("instances must not be empty")
+        return value
+
+
 class BatchPredictionRequest(BaseModel):
     instances: list[LoanApplicationFeatures]
     model_version: int | None = None
@@ -69,6 +102,9 @@ class PredictionResponse(BaseModel):
     request_id: str
     prediction: int
     prediction_label: str
+    positive_label: str = Field(
+        default="", description="What `probability` is the probability of."
+    )
     probability: float
     threshold: float
     model_name: str
@@ -77,6 +113,11 @@ class PredictionResponse(BaseModel):
     variant: str = "primary"
     inference_latency_ms: float
     explanation: dict[str, float] | None = None
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Accepted but notable: values outside the training range, unseen "
+        "categories, imputed nulls.",
+    )
     created_at: str = Field(default_factory=utcnow_iso)
 
 
@@ -86,6 +127,7 @@ class BatchPredictionResponse(BaseModel):
     model_version: int
     n_instances: int
     predictions: list[int]
+    prediction_labels: list[str] = Field(default_factory=list)
     probabilities: list[float]
     threshold: float
     inference_latency_ms: float
@@ -101,14 +143,31 @@ class FeedbackRequest(BaseModel):
     """
 
     request_id: str
-    actual_label: int = Field(..., ge=0, le=1)
+    # 0/1, or the model's own class label ("yes", "churned", ...). Resolved
+    # against the signature of the model that served the request.
+    actual_label: int | str
     source: str = "manual"
+
+    @field_validator("actual_label")
+    @classmethod
+    def _label_shape(cls, value: int | str) -> int | str:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int) and value not in (0, 1):
+            raise ValueError("a numeric label must be 0 or 1")
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("label must not be empty")
+        return value
 
 
 class FeedbackResponse(BaseModel):
     request_id: str
     recorded: bool
     labelled_total: int
+    model_name: str | None = None
+    model_version: int | None = None
+    actual_label: int | None = None
+    replaced_previous: bool = False
 
 
 class ModelInfoResponse(BaseModel):
