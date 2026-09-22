@@ -70,18 +70,24 @@ everyone to ignore the failure count.
 
 ## Execution model
 
-Runs execute as FastAPI `BackgroundTasks` **inside the API process** — the same
-mechanism `POST /api/v1/retraining/run-async` already uses. Be clear about what
-that does and does not give you:
+A run is queued as a **job** — a database row claimed atomically by the API's
+in-process worker — and the response carries its `job_id`. See
+[jobs.md](jobs.md). Be clear about what that does and does not give you:
 
-- Honest for the current single-task deployment.
-- A run in flight is **lost if the process dies**. Runs left `queued` or
-  `running` by a restart are reconciled to `failed` at startup, with the reason
-  recorded, rather than showing progress nothing is making.
+- Jobs, their logs and their results persist in the platform database, and the
+  queue is safe for several processes sharing that database.
+- A run **running** when the process dies is failed on recovery, with the
+  reason recorded, rather than showing progress nothing is making. It can be
+  retried; it is never silently resumed.
 - Training competes with request handling for the task's CPU. On the deployed
   0.5 vCPU task, a run makes the API slower while it lasts.
-- A multi-replica deployment needs a real job runner — Step Functions,
-  SageMaker Pipelines, or a queue. This is not that, and does not pretend to be.
+- It is not a distributed job system: the worker lives in the API container,
+  and the database is local to it.
+
+A run trains the dataset's own target (`target_column`) under a **model name**
+(`model_name`), with an optional explicit `positive_label`. The name is checked
+before the job is queued: a malformed name, a non-binary target, or a target
+that differs from the name's existing lineage is refused with 422/409 at once.
 
 ## From the console
 

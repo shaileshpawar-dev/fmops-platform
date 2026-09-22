@@ -39,8 +39,11 @@ There is no LLM anywhere in this path.
 limitation of the profiler:
 
 - the model factory builds classifiers,
-- `split_features_target` casts the label with `.astype(int)`,
-- evaluation computes ROC-AUC from `predict_proba[:, 1]`.
+- the target is encoded as two classes, `[negative, positive]`, recorded with
+  the model (the positive class is chosen explicitly, or is `yes`/`true`/`1`
+  when present, otherwise the rarer class),
+- evaluation, the approval gate, prediction drift and live quality are all
+  defined over those two classes.
 
 The profiler still *detects* regression and multiclass targets. It says so and
 refuses, with `422 unsupported_problem_type`, rather than casting a continuous
@@ -161,12 +164,17 @@ a page cannot queue unbounded training.
 
 ## Execution and cost
 
-Runs execute as FastAPI `BackgroundTasks` **inside the API process**, the same
-mechanism the training and retraining endpoints use. On the deployed single
+A run is queued as a **job** ([jobs.md](jobs.md)) and executed by the API's
+in-process worker, with its log captured and streamed. On the deployed single
 Fargate task this means **training competes with request handling for the
-task's CPU**, and a run in flight is lost if the process restarts (orphans are
-reconciled to `failed` with the reason recorded). Acceptable for this portfolio
-deployment; a multi-replica setup needs a real job runner.
+task's CPU**. A run interrupted by a restart is failed on recovery with the
+reason recorded, never silently resumed; it can be retried. Cancelling the job
+stops the run between candidates.
+
+The winner is registered under the run's **model name** (`model_name` in the
+request, or `<target>_classifier`). Every other candidate that trained is kept
+as a Development version so each leaderboard row stays traceable; only the
+winner is gated.
 
 Each candidate is a full training run, so *n* candidates cost roughly *n* times
 one training run. The UI states how many models a run will train before it
