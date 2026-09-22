@@ -139,6 +139,24 @@ def test_date_like_string_columns_are_excluded_rather_than_one_hot_encoded():
     assert by_name["opened_at"].role == "excluded"
 
 
+def test_text_columns_are_recognised_whatever_dtype_pandas_gives_them():
+    """pandas 2 stores strings as ``object``; pandas 3 stores them as ``str``.
+
+    Testing for ``object`` alone made every date column a high-cardinality
+    one-hot, and every string key a feature, on the pandas the image ships.
+    """
+    frame = _binary_frame(200)
+    frame["opened_at"] = pd.array(
+        pd.date_range("2024-01-01", periods=200).astype(str), dtype="string"
+    )
+    frame["account_ref"] = pd.array([f"ACC-{i:05d}" for i in range(200)], dtype="string")
+    by_name = {c.name: c for c in profile_frame(frame).columns}
+    assert by_name["opened_at"].kind == "datetime"
+    assert by_name["opened_at"].role == "excluded"
+    assert by_name["account_ref"].likely_identifier is True
+    assert by_name["account_ref"].role == "excluded"
+
+
 def test_constant_columns_are_excluded_and_warned_about():
     frame = _binary_frame(200)
     frame["always_one"] = 1

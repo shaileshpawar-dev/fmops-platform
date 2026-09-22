@@ -595,11 +595,14 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     system = data["system"]
     print("\n  SYSTEM")
-    print(
-        f"    {system['requests']} requests/60min  err={system['error_rate']:.2%}  "
-        f"p95={system['latency_p95_ms']:.1f}ms  cpu={system['cpu_percent']}%  "
-        f"mem={system['memory_percent']}%"
-    )
+    if "requests" not in system:
+        print(f"    unavailable: {system.get('error', 'no data')}")
+    else:
+        print(
+            f"    {system['requests']} requests/60min  err={system['error_rate']:.2%}  "
+            f"p95={system['latency_p95_ms']:.1f}ms  cpu={system['cpu_percent']}%  "
+            f"mem={system['memory_percent']}%"
+        )
 
     llm = data["llm"]
     print("\n  LLM")

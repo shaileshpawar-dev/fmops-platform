@@ -42,6 +42,10 @@ def dashboard_data(
     independently: a failure gathering LLM stats must not blank out the model
     section.
     """
+    # `fmops status` calls this function directly, where FastAPI's default is
+    # the Query object itself rather than a string.
+    if not isinstance(model, str) or not model:
+        model = None
     settings = get_settings()
     name = model or _focus_model()
     payload: dict[str, Any] = {

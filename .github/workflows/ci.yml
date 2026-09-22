@@ -347,7 +347,7 @@ jobs:
           exit 1
 
       - name: Scan the API image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: fmops/api:ci
           format: table

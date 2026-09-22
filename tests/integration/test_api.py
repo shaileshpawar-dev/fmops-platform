@@ -385,6 +385,25 @@ def test_a_staging_version_can_be_shadowed_but_never_take_live_traffic(
     assert registry.get(name, staged.version).stage == ModelStage.STAGING
 
 
+def test_the_dashboard_payload_can_be_built_outside_a_request(deployed_client):
+    """``fmops status`` imports this function and calls it directly.
+
+    Its parameter defaults to a FastAPI ``Query`` object, which is not a string:
+    left unguarded it reached SQLite as a bind parameter and every per-model
+    section failed with "type 'Query' is not supported".
+    """
+    from app.api.routes.dashboard import dashboard_data
+
+    data = dashboard_data()
+    assert "requests" in data["system"], data["system"]
+    broken = {
+        name: section["error"]
+        for name, section in data.items()
+        if isinstance(section, dict) and section.get("error")
+    }
+    assert not broken, broken
+
+
 def test_a_prediction_cannot_be_pinned_to_an_unapproved_version(
     deployed_client, settings, registry, sample_features
 ):

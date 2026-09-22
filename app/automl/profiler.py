@@ -183,6 +183,16 @@ def _looks_like_dates(series: pd.Series, sample: int = 200) -> bool:
     return bool(parsed.notna().mean() > 0.9)
 
 
+def _is_text(series: pd.Series) -> bool:
+    """Free text, whichever dtype this pandas uses for it.
+
+    pandas 2 gives strings ``object``; pandas 3 gives them ``str``. Testing for
+    ``object`` alone silently turned every date column into a high-cardinality
+    one-hot -- and every string key into a feature -- on pandas 3.
+    """
+    return bool(ptypes.is_object_dtype(series) or ptypes.is_string_dtype(series))
+
+
 def _classify_kind(series: pd.Series) -> str:
     if series.isna().all():
         return "empty"
@@ -192,7 +202,7 @@ def _classify_kind(series: pd.Series) -> str:
         return "boolean"
     if ptypes.is_numeric_dtype(series):
         return "numeric"
-    if series.dtype == object and _looks_like_dates(series):
+    if _is_text(series) and _looks_like_dates(series):
         return "datetime"
     return "categorical"
 
@@ -221,7 +231,7 @@ def _looks_like_identifier(name: str, series: pd.Series, n_rows: int) -> bool:
     if ptypes.is_bool_dtype(series) or ptypes.is_float_dtype(series):
         return False
     # An almost-unique integer or string column is a key in all but name.
-    return bool(ptypes.is_integer_dtype(series) or series.dtype == object)
+    return bool(ptypes.is_integer_dtype(series) or _is_text(series))
 
 
 def profile_columns(frame: pd.DataFrame) -> list[ColumnProfile]:
