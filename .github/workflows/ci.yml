@@ -346,8 +346,12 @@ jobs:
           docker rm -f fmops-ci
           exit 1
 
+      # The scan is advisory (exit-code 0), so the scanner being unavailable --
+      # its installer failed to download the binary on 2026-09-22 -- must not
+      # fail a build that is otherwise green. Findings still appear in the log.
       - name: Scan the API image for vulnerabilities
         uses: aquasecurity/trivy-action@v0.33.1
+        continue-on-error: true
         with:
           image-ref: fmops/api:ci
           format: table
