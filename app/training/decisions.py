@@ -66,7 +66,7 @@ class GateDecisionStore:
                 utcnow_iso(),
             ),
         )
-        return self.get(int(cursor.lastrowid))
+        return self.get(int(cursor.lastrowid or 0))
 
     def get(self, decision_id: int) -> dict[str, Any]:
         row = self.db.query_one("SELECT * FROM gate_decisions WHERE id = ?", (decision_id,))

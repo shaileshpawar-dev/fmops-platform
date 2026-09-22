@@ -350,6 +350,66 @@ def test_the_deploy_api_has_no_gate_override(deployed_client, settings, registry
     ].get("parameters", [{}])[0].get("name", "")
 
 
+def test_a_staging_version_can_be_shadowed_but_never_take_live_traffic(
+    deployed_client, settings, registry
+):
+    """Approval into Staging skips the comparison with the live version.
+
+    If a Staging version could take traffic, a successful rollout would walk it
+    into Production without ever being compared with the model it replaced --
+    a back door around the Production gate. It may only be shadowed.
+    """
+    from app.schemas.common import ModelStage
+
+    client, result = deployed_client
+    name = settings.tracking.registered_model_name
+    live = registry.get(name, result.registered_version)
+    staged = registry.register(name, live.artifact_uri, metrics=live.metrics)
+    for stage in (ModelStage.VALIDATION, ModelStage.STAGING):
+        registry.transition_stage(name, staged.version, stage)
+
+    for strategy in ("direct", "blue_green", "canary"):
+        response = client.post(
+            "/api/v1/deployments", json={"model_version": staged.version, "strategy": strategy}
+        )
+        assert response.status_code == 409, (strategy, response.text)
+        error = response.json()["error"]
+        assert error["code"] == "deployment_refused"
+        assert "only a Production version takes live traffic" in error["message"]
+    assert client.get("/api/v1/jobs?kind=deployment").json()["count"] == 0
+
+    shadow = client.post(
+        "/api/v1/deployments", json={"model_version": staged.version, "strategy": "shadow"}
+    )
+    assert shadow.status_code == 202, shadow.text
+    assert registry.get(name, staged.version).stage == ModelStage.STAGING
+
+
+def test_a_prediction_cannot_be_pinned_to_an_unapproved_version(
+    deployed_client, settings, registry, sample_features
+):
+    """``model_version`` must not let a caller be answered by a version the gate
+    never cleared."""
+    client, result = deployed_client
+    name = settings.tracking.registered_model_name
+    live = registry.get(name, result.registered_version)
+    unapproved = registry.register(name, live.artifact_uri, metrics=live.metrics)
+
+    response = client.post(
+        "/api/v1/predict",
+        json={"features": sample_features, "model_version": unapproved.version},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "version_not_servable"
+
+    pinned = client.post(
+        "/api/v1/predict",
+        json={"features": sample_features, "model_version": live.version},
+    )
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.json()["model_version"] == live.version
+
+
 def test_a_model_cannot_be_deployed_onto_another_models_endpoint(
     deployed_client, settings, registry
 ):

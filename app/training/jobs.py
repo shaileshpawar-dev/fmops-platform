@@ -100,6 +100,8 @@ class TrainingRun:
             "target_stage": self.target_stage,
             "model_name": self.model_name,
             "model_version": self.model_version,
+            "target_column": self.target_column,
+            "positive_label": self.positive_label,
             "exit_code": self.exit_code,
             "error": self.error,
             "metrics": metrics,
@@ -295,7 +297,7 @@ def execute_training_run(run_id: str, checkpoint: Any = None) -> str:
         if checkpoint is not None:
             checkpoint()
         run_settings = None
-        if run.target_column:
+        if run.target_column and run.dataset_version:
             from app.data.contract import contract_for_target
             from app.data.versioning import get_dataset_registry
 

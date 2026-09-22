@@ -173,7 +173,7 @@ class DatasetRegistry:
             tracked, message = self.dvc.add(source)
             if not tracked:
                 logger.info("dataset.dvc_skipped", extra={"reason": message})
-        details = {
+        details: dict[str, Any] = {
             "dataset_name": dataset_name,
             "path": str(source),
             "content_hash": content_hash,

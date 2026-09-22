@@ -73,7 +73,10 @@ def list_models() -> dict[str, Any]:
     for item in registry.list_models():
         name = item["name"]
         serving = registry.get_serving(name)
-        signature = signature_of(serving) if serving else None
+        # A name keeps one target for life, so any version's signature describes
+        # the model -- including one that is not serving yet.
+        described = serving or registry.get_latest(name)
+        signature = signature_of(described) if described else None
         models.append(
             {
                 **item,
@@ -96,6 +99,31 @@ def algorithms() -> dict[str, Any]:
     not installed, rather than failing only at training time.
     """
     return {"algorithms": available_algorithms()}
+
+
+@router.get("/decisions", summary="Gate decisions across every model")
+def all_decisions(limit: int = Query(default=50, ge=1, le=500)) -> dict[str, Any]:
+    """Newest first. Registered before the per-model routes, and a single
+    segment, so it cannot be mistaken for a model name's sub-resource."""
+    rows = get_gate_decisions().list(limit=limit)
+    return {"count": len(rows), "decisions": rows}
+
+
+@router.get("/pending", summary="Versions waiting for a human decision")
+def pending_approvals() -> dict[str, Any]:
+    """Versions that passed every automated check in an environment that
+    requires sign-off, across every model."""
+    from app.core.db import get_database
+
+    rows = get_database().query(
+        "SELECT name, version, stage, algorithm, metrics, created_at FROM model_versions "
+        "WHERE status = 'pending' AND stage IN ('Development', 'Validation') "
+        "ORDER BY created_at DESC LIMIT 100"
+    )
+    from app.core.db import loads
+
+    items = [{**dict(r), "metrics": loads(r["metrics"], {})} for r in rows]
+    return {"count": len(items), "versions": items}
 
 
 @router.get("/{name}/versions", response_model=list[ModelVersion], summary="List versions")

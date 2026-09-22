@@ -457,7 +457,8 @@ def test_rollback_restores_the_previous_model_end_to_end(platform):
     )
 
     second = _train(platform, run_name="second")
-    for stage in (ModelStage.VALIDATION, ModelStage.STAGING):
+    # Only a Production version takes live traffic.
+    for stage in (ModelStage.VALIDATION, ModelStage.STAGING, ModelStage.PRODUCTION):
         registry.transition_stage(name, second.registered_version, stage)
     manager.deploy(
         DeploymentRequest(

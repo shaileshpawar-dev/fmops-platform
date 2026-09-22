@@ -36,6 +36,7 @@ from app.schemas.evaluation import (
     MonitoringSummary,
     ServiceMetrics,
 )
+from app.schemas.model import ModelVersion
 
 logger = get_logger(__name__)
 
@@ -69,12 +70,13 @@ class MonitoringService:
         means nothing, which is worse than reporting that the reference is gone.
         """
         model_name = self._name(model_name)
+        version_record: ModelVersion | None
         if model_version is not None:
             version_record = self.registry.get(model_name, model_version)
         else:
             version_record = self.registry.get_serving(model_name)
         dataset_version = version_record.dataset_version if version_record else None
-        if not dataset_version:
+        if version_record is None or not dataset_version:
             raise InsufficientDataError(
                 f"{model_name} has no serving version with a recorded training dataset, "
                 "so there is no reference to compare production traffic against",

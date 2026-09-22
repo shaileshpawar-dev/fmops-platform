@@ -128,8 +128,8 @@ def evaluate_approval(
     elif config.require_manual_approval:
         decision = ApprovalDecision.PENDING_MANUAL
         reason = (
-            "all automated checks passed; manual approval is required in this "
-            "environment before promotion to Production"
+            "all automated checks passed; this environment requires a person to "
+            "approve any promotion"
         )
     else:
         decision = ApprovalDecision.APPROVED

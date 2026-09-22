@@ -211,7 +211,7 @@ def _training(db: Any, name: str, version: int, run_id: str | None) -> dict[str,
         )
         if automl is not None:
             candidates = loads(automl["candidates"], [])
-            me = next((c for c in candidates if c.get("run_id") == run_id), {})
+            me: dict[str, Any] = next((c for c in candidates if c.get("run_id") == run_id), {})
             found = {
                 "kind": "automl",
                 "id": automl["id"],

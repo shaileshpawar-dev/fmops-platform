@@ -11,7 +11,13 @@ The single entry point for putting a model version into service. It:
 
 Step 2 is the important one: the manager is the last gate before traffic. A
 version that failed its approval checks cannot be deployed by accident, only by
-an explicit ``force=True`` that is written to the audit log.
+an explicit ``force=True`` (CLI only, written to the audit log).
+
+Live traffic needs Production. Approval into Staging checks the absolute
+thresholds but not the comparison with the live version, so a Staging version
+may only be shadowed -- scored on mirrored traffic, serving nothing. Letting it
+take traffic would walk it into Production without ever being compared with
+the model it replaces.
 """
 
 from __future__ import annotations
@@ -54,8 +60,18 @@ STRATEGIES: dict[DeploymentStrategy, type[Strategy]] = {
 # Stages whose versions may be deployed. Only the approval gate (the end of a
 # training run, or /approve) moves a version into either, so "deployable" means
 # "the gate said yes". Validation is deliberately absent: it is reachable
-# without the gate, and a successful deploy walks the version to Production.
+# without the gate.
 DEPLOYABLE_STAGES = (ModelStage.STAGING, ModelStage.PRODUCTION)
+
+# Strategies that end with the candidate answering callers. Only a version that
+# passed the Production gate -- thresholds, the shared-holdout comparison with
+# the live version, and a human where the environment requires one -- may run
+# them. Shadow serves nothing, so a Staging version may be shadowed.
+LIVE_STRATEGIES = (
+    DeploymentStrategy.DIRECT,
+    DeploymentStrategy.BLUE_GREEN,
+    DeploymentStrategy.CANARY,
+)
 
 
 class DeploymentRefusedError(DeploymentError):
@@ -117,12 +133,19 @@ class DeploymentManager:
 
     # -- deploy -------------------------------------------------------------- #
     def validate_request(
-        self, request: DeploymentRequest, force: bool = False
+        self,
+        request: DeploymentRequest,
+        force: bool = False,
+        promotion_checked: bool = False,
     ) -> tuple[str, str, DeploymentStrategy]:
         """Everything that can refuse a deployment, checked without side effects.
 
         The API calls this before queueing a deployment job, so a request that
         would be refused is refused immediately, not minutes later in a job.
+
+        ``promotion_checked`` is for the retraining pipeline only, which has just
+        run the gate and the shared-holdout comparison against production
+        itself. It is not reachable from the API.
         """
         model_name = request.model_name or default_model_name(self.settings)
         endpoint = endpoint_for(model_name, self.settings)
@@ -138,6 +161,23 @@ class DeploymentManager:
             self.settings.deployment.strategy
         )
         candidate = self._validate_candidate(model_name, request.model_version, force)
+        if (
+            strategy_kind in LIVE_STRATEGIES
+            and candidate.stage != ModelStage.PRODUCTION
+            and not (force or promotion_checked)
+        ):
+            raise DeploymentRefusedError(
+                f"model {model_name} v{candidate.version} is in {candidate.stage.value}; only "
+                f"a Production version takes live traffic ({strategy_kind.value} would make it "
+                "the one answering callers). Approve it into Production first -- that re-runs "
+                "the gate and compares it with the live version on held-out rows neither "
+                f"trained on (POST /api/v1/models/{model_name}/versions/{candidate.version}"
+                "/approve with target_stage Production) -- or deploy it with the shadow "
+                "strategy to score live inputs without serving them.",
+                model=model_name,
+                version=candidate.version,
+                stage=candidate.stage.value,
+            )
         active = self.store.active(endpoint)
         current_version = active.current_version if active else None
         if strategy_kind in (DeploymentStrategy.CANARY, DeploymentStrategy.SHADOW) and (
@@ -175,13 +215,16 @@ class DeploymentManager:
         actor: str = "system",
         sleep: Any = None,
         on_created: Any = None,
+        promotion_checked: bool = False,
     ) -> DeploymentResult:
         """Put a version into service.
 
         ``sleep`` replaces the canary's wait between steps; the job runner
         passes one that wakes to honour cancellation.
         """
-        model_name, endpoint, strategy_kind = self.validate_request(request, force)
+        model_name, endpoint, strategy_kind = self.validate_request(
+            request, force, promotion_checked
+        )
         candidate = self.registry.get(model_name, request.model_version)
         active = self.store.active(endpoint)
         current_version = active.current_version if active else None

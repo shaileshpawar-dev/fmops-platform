@@ -92,6 +92,8 @@ class PredictionService:
         """
         model_name = model_name or default_model_name(self.settings)
         endpoint = endpoint_for(model_name, self.settings)
+        if version is not None:
+            self._check_pinnable(model_name, version)
         try:
             return self.provider.resolve(endpoint, version)
         except ModelNotLoadedError:
@@ -101,10 +103,9 @@ class PredictionService:
             if serving is None:
                 raise ModelNotLoadedError(
                     "no model is available to serve: nothing is deployed and the "
-                    f"registry has no {ModelStage.PRODUCTION.value} or "
-                    f"{ModelStage.STAGING.value} version of "
-                    f"{model_name!r}. Train it and promote a version to Staging "
-                    "or Production first.",
+                    f"registry has no {ModelStage.PRODUCTION.value} version of "
+                    f"{model_name!r}. Approve a version into Production (a Staging "
+                    "version is approved for shadow evaluation only) and deploy it.",
                     model=model_name,
                     endpoint=endpoint,
                 ) from None
@@ -118,6 +119,26 @@ class PredictionService:
                 },
             )
             return self.provider.cache.get(model_name, serving.version), "primary"
+
+    def _check_pinnable(self, model_name: str, version: int) -> None:
+        """A pinned request may name only a version the gate approved.
+
+        Otherwise ``model_version`` would let any caller be answered by a
+        version that failed its checks, or was never judged at all.
+        """
+        from app.core.exceptions import VersionNotServableError
+        from app.registry.base import PINNABLE_STAGES
+
+        record = self.registry.get(model_name, version)
+        if record.stage not in PINNABLE_STAGES:
+            raise VersionNotServableError(
+                f"{model_name} v{version} is in {record.stage.value}; a request may be pinned "
+                "only to a version the approval gate cleared "
+                f"({', '.join(s.value for s in PINNABLE_STAGES)})",
+                model=model_name,
+                version=version,
+                stage=record.stage.value,
+            )
 
     # -- prediction ---------------------------------------------------------- #
     def predict_one(

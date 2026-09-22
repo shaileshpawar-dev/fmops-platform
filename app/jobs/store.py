@@ -93,7 +93,7 @@ class JobStore:
                 utcnow_iso(),
             ),
         )
-        return self.get(job_id)
+        return self._must(job_id)
 
     def claim_next(self, max_running: int) -> dict[str, Any] | None:
         """Atomically take the oldest queued job, if the global cap allows.
@@ -166,7 +166,7 @@ class JobStore:
                 "UPDATE jobs SET cancel_requested = 1 WHERE id = ? AND status = ?",
                 (job_id, RUNNING),
             )
-        return self.get(job_id)
+        return self._must(job_id)
 
     def cancel_requested(self, job_id: str) -> bool:
         return bool(
@@ -218,6 +218,12 @@ class JobStore:
         return out
 
     # -- reads ----------------------------------------------------------------------- #
+    def _must(self, job_id: str) -> dict[str, Any]:
+        job = self.get(job_id)
+        if job is None:  # pragma: no cover - the row was written a moment ago
+            raise LookupError(f"job {job_id} vanished")
+        return job
+
     def get(self, job_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
         return _to_dict(row) if row else None

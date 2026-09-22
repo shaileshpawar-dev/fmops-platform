@@ -52,8 +52,13 @@ ALLOWED_TRANSITIONS: dict[ModelStage, set[ModelStage]] = {
     ModelStage.ARCHIVED: {ModelStage.DEVELOPMENT},
 }
 
-# Stages that may serve traffic.
-SERVING_STAGES = (ModelStage.PRODUCTION, ModelStage.STAGING)
+# Stages that may answer live traffic. Staging is approved against the absolute
+# thresholds only -- never compared with the live version -- so a Staging
+# version may be shadowed or pinned explicitly, but it never serves by default.
+SERVING_STAGES = (ModelStage.PRODUCTION,)
+
+# Stages a caller may pin a request to: the gate said yes to both.
+PINNABLE_STAGES = (ModelStage.PRODUCTION, ModelStage.STAGING)
 
 
 def assert_transition(current: ModelStage, target: ModelStage) -> None:
@@ -136,7 +141,7 @@ class ModelRegistry(ABC):
         return self.get_latest(name, ModelStage.PRODUCTION)
 
     def get_serving(self, name: str) -> ModelVersion | None:
-        """The version that should serve traffic: Production, else Staging."""
+        """The version that serves live traffic by default: the Production one."""
         for stage in SERVING_STAGES:
             found = self.get_latest(name, stage)
             if found is not None:

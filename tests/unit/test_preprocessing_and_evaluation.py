@@ -320,11 +320,13 @@ def test_unknown_version_raises(registry):
         registry.get("m", 999)
 
 
-def test_get_serving_prefers_production_over_staging(registry):
+def test_only_production_serves_by_default(registry):
+    """Staging clears the thresholds but is never compared with the live model,
+    so it is approved for shadow evaluation -- not for answering callers."""
     staging = registry.register("m", "file:///a")
     registry.transition_stage("m", staging.version, ModelStage.VALIDATION)
     registry.transition_stage("m", staging.version, ModelStage.STAGING)
-    assert registry.get_serving("m").version == staging.version
+    assert registry.get_serving("m") is None
 
     production = registry.register("m", "file:///b")
     for stage in (ModelStage.VALIDATION, ModelStage.STAGING, ModelStage.PRODUCTION):

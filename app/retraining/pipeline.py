@@ -425,6 +425,9 @@ class RetrainingPipeline:
                         reason=f"automatic retraining: {reason}",
                     ),
                     actor="retraining",
+                    # The gate and the shared-holdout comparison with production
+                    # both ran above; this is the promotion they authorised.
+                    promotion_checked=True,
                 )
                 deployed = result.succeeded
                 if deployed:

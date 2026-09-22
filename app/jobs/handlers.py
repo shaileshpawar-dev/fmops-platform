@@ -186,40 +186,40 @@ def prepare_retry(job: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     if kind == TRAINING:
         from app.training.jobs import get_training_run_store
 
-        store = get_training_run_store()
-        old = store.get(job["payload"]["run_id"])
-        if old is None:
+        runs = get_training_run_store()
+        previous = runs.get(job["payload"]["run_id"])
+        if previous is None:
             raise ValueError("the original training run no longer exists")
-        new = store.create(
-            dataset_version=old.dataset_version,
-            algorithm=old.algorithm,
-            tune=old.tune,
-            promote=old.promote,
-            target_stage=old.target_stage or "Staging",
-            model_name=old.model_name,
-            target_column=old.target_column,
-            positive_label=old.positive_label,
+        fresh = runs.create(
+            dataset_version=previous.dataset_version,
+            algorithm=previous.algorithm,
+            tune=previous.tune,
+            promote=previous.promote,
+            target_stage=previous.target_stage or "Staging",
+            model_name=previous.model_name,
+            target_column=previous.target_column,
+            positive_label=previous.positive_label,
             requested_by=job.get("requested_by"),
         )
-        return {"run_id": new.id}, new.id
+        return {"run_id": fresh.id}, fresh.id
     if kind == AUTOML:
         from app.automl.runner import get_automl_store
 
-        store = get_automl_store()
-        old = store.get(job["payload"]["run_id"])
-        if old is None:
+        automl_runs = get_automl_store()
+        original = automl_runs.get(job["payload"]["run_id"])
+        if original is None:
             raise ValueError("the original AutoML run no longer exists")
-        new_id = store.create(
-            dataset_version=old["dataset_version"],
-            target=old["target_column"],
-            problem_type=old["problem_type"],
-            algorithms=old["algorithms"],
-            primary_metric=old["primary_metric"],
-            tune=old["tune"],
-            target_stage=old["target_stage"],
-            max_models=old["max_models"],
-            model_name=old.get("model_name"),
-            positive_label=old.get("positive_label"),
+        new_id = automl_runs.create(
+            dataset_version=original["dataset_version"],
+            target=original["target_column"],
+            problem_type=original["problem_type"],
+            algorithms=original["algorithms"],
+            primary_metric=original["primary_metric"],
+            tune=original["tune"],
+            target_stage=original["target_stage"],
+            max_models=original["max_models"],
+            model_name=original.get("model_name"),
+            positive_label=original.get("positive_label"),
         )
         return {"run_id": new_id}, new_id
     return dict(job["payload"]), None

@@ -294,38 +294,63 @@ def test_a_users_own_model_through_the_whole_lifecycle(
         assert now == candidate
     else:
         assert now == v1, "a candidate that was not deployed must not be serving"
-        # Put a second approved version live so rollback has somewhere to go back from.
-        promoted = client.post(
+
+        # ---- 20. a losing candidate has no back door into production ------------------------- #
+        # The Production gate compares it with the live version again, and refuses.
+        refused = client.post(
             f"/api/v1/models/{MODEL}/versions/{candidate}/approve",
-            json={"target_stage": "Staging", "comment": "acceptance: rollback drill"},
+            json={"target_stage": "Production", "comment": "acceptance: try to promote"},
         )
-        assert promoted.status_code == 200, promoted.text
-        drill = _ok(
+        assert refused.status_code == 409, refused.text
+        # Staging only needs the thresholds -- and a Staging version cannot take
+        # live traffic, so it cannot reach Production by being deployed either.
+        staged = client.post(
+            f"/api/v1/models/{MODEL}/versions/{candidate}/approve",
+            json={"target_stage": "Staging", "comment": "acceptance: watch it in shadow"},
+        )
+        assert staged.status_code == 200, staged.text
+        live_attempt = client.post(
+            "/api/v1/deployments",
+            json={"model_name": MODEL, "model_version": candidate, "strategy": "direct"},
+        )
+        assert live_attempt.status_code == 409, live_attempt.text
+        assert live_attempt.json()["error"]["code"] == "deployment_refused"
+
+        # It may be shadowed: scored on mirrored live traffic, serving nothing.
+        shadow = _ok(
             client.post(
                 "/api/v1/deployments",
-                json={"model_name": MODEL, "model_version": candidate, "strategy": "direct"},
+                json={"model_name": MODEL, "model_version": candidate, "strategy": "shadow"},
             ),
             202,
         )
-        _job(client, drill["job"]["id"])
-
-    # ---- 20. which version is production now ---------------------------------------------------- #
-    serving = _ok(client.get(f"/api/v1/deployments/current?model={MODEL}"))
-    assert serving["versions"]["current"] == candidate
-    assert serving["versions"]["previous"] == v1
-
-    # ---- 21. rollback ---------------------------------------------------------------------------- #
-    rolled = _ok(
-        client.post(
-            "/api/v1/deployments/rollback",
-            json={"model_name": MODEL, "reason": "acceptance: roll back"},
+        assert _job(client, shadow["job"]["id"])["status"] == "succeeded"
+        mirrored = _ok(client.get(f"/api/v1/deployments/current?model={MODEL}"))["versions"]
+        assert mirrored["current"] == v1 and mirrored["shadow"] == candidate
+        served = _ok(
+            client.post(f"/api/v1/models/{MODEL}/predict", json={"features": example})
         )
-    )
-    assert rolled["succeeded"] and rolled["rolled_back_to"] == v1
-    after = _ok(client.get(f"/api/v1/deployments/current?model={MODEL}"))
-    assert after["versions"]["current"] == v1
-    back = _ok(client.post(f"/api/v1/models/{MODEL}/predict", json={"features": example}))
-    assert back["model_version"] == v1, "after rollback the old version must serve"
+        assert served["model_version"] == v1, "a shadow must never answer the caller"
+        assert (
+            _ok(client.get(f"/api/v1/models/{MODEL}/versions/{candidate}"))["stage"]
+            == "Staging"
+        )
+
+    # ---- 21. rollback (when the candidate went live) ------------------------------------------ #
+    # The rejected branch has nothing live to roll back from; rollback after an
+    # automatic promotion is exercised end to end by the next test.
+    if decision["deployed"]:
+        serving = _ok(client.get(f"/api/v1/deployments/current?model={MODEL}"))
+        assert serving["versions"]["previous"] == v1
+        rolled = _ok(
+            client.post(
+                "/api/v1/deployments/rollback",
+                json={"model_name": MODEL, "reason": "acceptance: roll back"},
+            )
+        )
+        assert rolled["succeeded"] and rolled["rolled_back_to"] == v1
+        back = _ok(client.post(f"/api/v1/models/{MODEL}/predict", json={"features": example}))
+        assert back["model_version"] == v1, "after rollback the old version must serve"
 
     # ---- lineage: from the production model back to its data -------------------------------------- #
     lineage = _ok(client.get(f"/api/v1/models/{MODEL}/versions/{v1}/lineage"))

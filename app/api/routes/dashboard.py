@@ -148,7 +148,8 @@ def _models_section() -> dict[str, Any]:
         name = item["name"]
         serving = registry.get_serving(name)
         deployment = manager.status(endpoint_for(name))
-        signature = signature_of(serving) if serving else None
+        described = serving or registry.get_latest(name)
+        signature = signature_of(described) if described else None
         drift = db.query_one(
             "SELECT drift_detected, created_at FROM drift_reports WHERE model_name = ? "
             "ORDER BY created_at DESC LIMIT 1",

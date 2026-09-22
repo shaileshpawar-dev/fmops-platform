@@ -156,6 +156,13 @@ class InvalidPredictionInputError(PredictionError):
     http_status = 422
 
 
+class VersionNotServableError(PredictionError):
+    """A request pinned a version the approval gate never cleared."""
+
+    code = "version_not_servable"
+    http_status = 409
+
+
 class PredictionNotFoundError(PredictionError):
     """Feedback for a request the platform never served."""
 
