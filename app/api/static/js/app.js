@@ -18,15 +18,18 @@
 const NAV = [
   { group:"Control", items:[
       ["overview","Command Center","grid"], ["models","Models","layers"],
-      ["deployments","Deployments","deploy"], ["incidents","Incidents","bell"] ] },
+      ["deployments","Deployments","deploy"], ["jobs","Jobs","clock"],
+      ["incidents","Incidents","bell"] ] },
   { group:"Build", items:[
       ["datasets","Datasets","database"], ["training","Training","sliders"],
       ["automl","AutoML","chip"], ["experiments","Experiments","beaker"] ] },
+  { group:"Serve", items:[
+      ["predict","Predict","target"] ] },
   { group:"Operate", items:[
       ["monitoring","Observability","activity"], ["drift","Drift","wave"],
       ["retraining","Retraining","refresh"] ] },
   { group:"Govern", items:[
-      ["gates","Quality Gates","shieldOk"], ["audit","Audit","list"],
+      ["gates","Approvals & Gates","shieldOk"], ["audit","Audit","list"],
       ["runtime","Runtime","server"] ] },
   { group:"LLMOps", items:[
       ["llm-overview","Overview","message"], ["llm-prompts","Prompts","fileText"],
@@ -57,15 +60,17 @@ function buildNav(){
   ).join("");
 }
 
-/* Routes are `#/page` or `#/page/param`. The param exists so a model version
-   can be addressable -- #/models/3 -- without a router rewrite. */
+/* Routes are `#/page` followed by path segments: #/models/churn_model/3 is
+   version 3 of churn_model; #/jobs/job-123 is one job. A query string carries
+   view state (?tab=, ?model=) so every view is linkable. */
 function routeParts(){
   const raw = (location.hash || "#/overview").replace(/^#\//,"").split("?")[0];
-  const seg = raw.split("/").filter(Boolean);
-  return { id: seg[0] || "overview", param: seg[1] ? decodeURIComponent(seg[1]) : null };
+  const seg = raw.split("/").filter(Boolean).map(decodeURIComponent);
+  return { id: seg[0] || "overview", param: seg[1] || null, params: seg.slice(1) };
 }
 function route(){ const p = routeParts(); return PAGES[p.id] ? p.id : "overview"; }
 function routeParam(){ return routeParts().param; }
+function routeParams(){ return routeParts().params; }
 
 let refreshTimer = null;
 async function render(){
@@ -111,6 +116,7 @@ function wirePage(){
   /* A page may own its own wiring. Pages predating this hook are still wired
      below; new ones should declare wire() and keep their handlers next to the
      markup that needs them. */
+  wireModelPicker();
   const own = PAGES[route()];
   if(own && typeof own.wire === "function") own.wire();
 
@@ -129,122 +135,9 @@ function wirePage(){
     q.oninput = apply; sel.onchange = apply;
   }
 
-  /* ---- Datasets: upload, validate, preview ----------------------------- */
-  const up = $("#dsupload");
-  if(up) up.onclick = async () => {
-    const input = $("#dsfile");
-    const file = input && input.files && input.files[0];
-    if(!file){ toast("Choose a CSV file first.", "bad"); return; }
-    if(!/\.csv$/i.test(file.name)){ toast("Only .csv files are accepted.", "bad"); return; }
+  /* Datasets owns its wiring now: see PAGES.datasets.wire. */
 
-    const needsKey = await authRequired();
-    const proceed = await confirmAction({
-      title: "Upload dataset",
-      body: `Register ${file.name} (${(file.size/1024).toFixed(0)} KB) as a new dataset version and validate it.`,
-      confirm: "Upload", needsKey,
-    });
-    if(!proceed) return;
-    if(needsKey && !proceed.key){ toast("An API key is required to upload.", "bad"); return; }
-
-    up.disabled = true; up.textContent = "Uploading...";
-    const desc = ($("#dsdesc") && $("#dsdesc").value) || "";
-    const qs = `?filename=${encodeURIComponent(file.name)}&description=${encodeURIComponent(desc)}`;
-    try {
-      const res = await fetch("/api/v1/datasets/upload" + qs, {
-        method: "POST",
-        headers: Object.assign({ "Content-Type": "text/csv" },
-                               proceed.key ? { "X-API-Key": proceed.key } : {}),
-        body: file,
-      });
-      const body = await res.json();
-      if(!res.ok){
-        const msg = (body.error && body.error.message) || `HTTP ${res.status}`;
-        $("#dsresult").innerHTML = `<div class="note" style="border-color:var(--bad);
-          background:var(--bad-bg)"><b>Upload rejected.</b><br>${esc(msg)}</div>`;
-        toast("Upload rejected: " + msg, "bad");
-        return;
-      }
-      api.bust();
-      toast(`Registered ${body.version} (${body.rows} rows).`, "ok");
-      $("#dsresult").innerHTML =
-        `<div class="note"><b>Registered ${esc(body.version)}</b> &mdash; ${body.rows} rows,
-          ${body.columns} columns.</div>` +
-        (body.validation ? renderValidation(body.validation) : "");
-    } catch(e){
-      toast("Upload failed: " + e.message, "bad");
-    } finally {
-      up.disabled = false; up.textContent = "Upload and validate";
-    }
-  };
-
-  document.querySelectorAll('[data-act="ds-validate"]').forEach(b => b.onclick = async () => {
-    const target = $("#dsdetail");
-    b.disabled = true; b.textContent = "Validating...";
-    target.innerHTML = card("Validation", skeleton(4), { flush:true });
-    try {
-      const v = await api.get(`/api/v1/datasets/${encodeURIComponent(b.dataset.v)}/validation`, 0);
-      target.innerHTML = card(`Validation - ${esc(b.dataset.v)}`, renderValidation(v));
-      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
-    } catch(e){
-      target.innerHTML = card("Validation", errorState(e.message, location.hash));
-    } finally { b.disabled = false; b.textContent = "Validate"; }
-  });
-
-  document.querySelectorAll('[data-act="ds-preview"]').forEach(b => b.onclick = async () => {
-    const target = $("#dsdetail");
-    b.disabled = true; b.textContent = "Loading...";
-    target.innerHTML = card("Preview", skeleton(4), { flush:true });
-    try {
-      const p = await api.get(`/api/v1/datasets/${encodeURIComponent(b.dataset.v)}/preview?rows=15`, 0);
-      target.innerHTML = renderPreview(p);
-      target.scrollIntoView({ behavior:"smooth", block:"nearest" });
-    } catch(e){
-      target.innerHTML = card("Preview", errorState(e.message, location.hash));
-    } finally { b.disabled = false; b.textContent = "Preview"; }
-  });
-
-  /* ---- Training: start a run, then poll it ----------------------------- */
-  const start = $("#trstart");
-  if(start) start.onclick = async () => {
-    const stage = $("#trstage").value;
-    const payload = {
-      dataset_version: $("#trds").value || null,
-      algorithm: $("#tralgo").value || null,
-      tune: !!$("#trtune").checked,
-      promote: !!stage,
-    };
-    if(stage) payload.target_stage = stage;
-
-    const needsKey = await authRequired();
-    const proceed = await confirmAction({
-      title: "Start training run",
-      body: payload.promote
-        ? `Train on ${payload.dataset_version || "the latest dataset"} and, if the approval gate passes and it beats the incumbent, promote to ${stage}.`
-        : `Train on ${payload.dataset_version || "the latest dataset"}. The model will not be registered.`,
-      confirm: "Start training", needsKey,
-    });
-    if(!proceed) return;
-    if(needsKey && !proceed.key){ toast("An API key is required to start training.", "bad"); return; }
-
-    start.disabled = true; start.textContent = "Starting...";
-    try {
-      const res = await api.post("/api/v1/training/runs", payload, proceed.key);
-      api.bust();
-      toast("Training started.", "ok");
-      $("#trresult").innerHTML = `<div class="note"><b>Run ${esc(res.run_id)} accepted.</b>
-        Polling for progress.</div>`;
-      pollRun(res.run_id);
-    } catch(e){
-      const msg = (e.status === 401 || e.status === 403)
-        ? "Rejected: the API key was missing or not accepted." : e.message;
-      $("#trresult").innerHTML = `<div class="note" style="border-color:var(--bad);
-        background:var(--bad-bg)"><b>Could not start.</b><br>${esc(msg)}</div>`;
-      toast(msg, "bad");
-    } finally {
-      start.disabled = false; start.textContent = "Start training";
-    }
-  };
-
+  /* Training owns its wiring now: see PAGES.training.wire. */
   document.querySelectorAll('[data-act="tr-detail"]').forEach(b => b.onclick = async () => {
     const target = $("#trdetail");
     target.innerHTML = card("Run detail", skeleton(4), { flush:true });
@@ -290,21 +183,6 @@ function wirePage(){
 
   wireWizard();
 
-  const rb = document.querySelector('[data-act="rollback"]');
-  if(rb) rb.onclick = () => runAction({
-    title:"Roll back deployment",
-    body:"This restores the previous model version as the serving version. It changes what production traffic is scored by.",
-    confirm:"Roll back", danger:true, needsKey:true,
-    path:"/api/v1/deployments/rollback", payload:{ reason:"manual rollback from console" },
-    success:"Rollback requested." });
-
-  document.querySelectorAll('[data-act="promote"]').forEach(b => b.onclick = () => runAction({
-    title:`Promote v${b.dataset.ver} to Production`,
-    body:"The registry stage machine and the approval gate still apply — this request can be rejected by the backend.",
-    confirm:"Promote", needsKey:true,
-    path:`/api/v1/models/${encodeURIComponent(b.dataset.model)}/versions/${encodeURIComponent(b.dataset.ver)}/stage`,
-    payload:{ stage:"Production" }, success:"Stage transition requested." }));
-
   document.querySelectorAll('[data-act="ack"]').forEach(b => b.onclick = () => runAction({
     title:"Acknowledge alert",
     body:"Marks this alert as acknowledged. It stays in the history.",
@@ -334,11 +212,16 @@ async function header(){
     /* Rail counts, from the payload just fetched. Only counts the backend
        actually reports -- an absent section leaves its entry unnumbered
        rather than showing a zero it did not confirm. */
-    const model = d.model || {}, alerts = d.alerts || {};
+    const model = d.model || {}, alerts = d.alerts || {}, jobs = d.jobs || {};
+    const fleet = (d.models || {}).models || [];
     window.__dashModel = model;   // the palette reads versions from here
+    window.__fleet = fleet;       // ...and model names from here
     const next = {};
-    if(model.available && model.total_versions != null)
-      next.models = { n: model.total_versions };
+    if(fleet.length) next.models = { n: fleet.length };
+    const awaiting = fleet.reduce((n, m) => n + (m.awaiting_approval || 0), 0);
+    if(awaiting) next.gates = { n: awaiting, alert: true };
+    const busy = ((jobs.counts || {}).running || 0) + ((jobs.counts || {}).queued || 0);
+    if(busy) next.jobs = { n: busy };
     if(alerts.available && alerts.open_count)
       next.incidents = { n: alerts.open_count, alert: true };
     if(JSON.stringify(next) !== JSON.stringify(NAV_COUNTS)){ NAV_COUNTS = next; buildNav(); }
@@ -413,23 +296,30 @@ function paletteItems(){
   return nav;
 }
 
-/* Model versions come from the dashboard payload the header already holds, so
-   the palette adds no request. If it has not loaded yet the palette simply
-   shows routes -- it never blocks on a fetch. */
+/* Models and versions come from the dashboard payload the header already
+   holds, so the palette adds no request. If it has not loaded yet the palette
+   simply shows routes -- it never blocks on a fetch. */
 function paletteVersions(){
+  const fleet = (window.__fleet || []).map(m => ({
+    label: m.name,
+    hint: m.serving_version != null ? `serving v${m.serving_version}` : "not serving",
+    group: "Models",
+    icon: "layers",
+    hash: `#/models/${encodeURIComponent(m.name)}`,
+  }));
   const m = (window.__dashModel || {});
   const name = m.model_name;
-  if(!name || !Array.isArray(m.versions)) return [];
-  return m.versions.slice()
+  if(!name || !Array.isArray(m.versions)) return fleet;
+  return fleet.concat(m.versions.slice()
     .sort((a, b) => b.version - a.version)
     .slice(0, 25)
     .map(v => ({
-      label: `v${v.version}`,
-      hint: `${name} · ${v.stage || "unknown"}${v.algorithm ? " · " + v.algorithm : ""}`,
+      label: `${name} v${v.version}`,
+      hint: `${v.stage || "unknown"}${v.algorithm ? " · " + v.algorithm : ""}`,
       group: "Model versions",
       icon: "layers",
-      hash: `#/models/${v.version}`,
-    }));
+      hash: `#/models/${encodeURIComponent(name)}/${v.version}`,
+    })));
 }
 
 function openPalette(){

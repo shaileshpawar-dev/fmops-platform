@@ -633,18 +633,21 @@ def test_dashboard_console_has_every_navigation_section(api_client):
         ("overview", "Command Center"),
         ("models", "Models"),
         ("deployments", "Deployments"),
+        ("jobs", "Jobs"),
         ("incidents", "Incidents"),
         # BUILD
         ("datasets", "Datasets"),
         ("training", "Training"),
         ("automl", "AutoML"),
         ("experiments", "Experiments"),
+        # SERVE
+        ("predict", "Predict"),
         # OPERATE
         ("monitoring", "Observability"),
         ("drift", "Drift"),
         ("retraining", "Retraining"),
         # GOVERN
-        ("gates", "Quality Gates"),
+        ("gates", "Approvals & Gates"),
         ("audit", "Audit"),
         ("runtime", "Runtime"),
         # LLMOPS

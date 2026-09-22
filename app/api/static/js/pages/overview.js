@@ -1,4 +1,4 @@
-/* Command Center -- the operations control tower.
+/* Command Center -- the operations control tower, for every model.
  *
  * One question, in a fixed reading order: what is happening to my models right
  * now? Health first, because it is the only thing that might need you in the
@@ -43,7 +43,10 @@ function buildLifecycle(d, extra){
   }
 
   const stage = model.current_stage || null;
-  const deployable = ["Staging","Production","Validation"].includes(stage);
+  // The same rule the deployment API enforces: only a Production version takes
+  // live traffic. Staging cleared the thresholds and may only be shadowed.
+  const deployable = stage === "Production";
+  const staged = stage === "Staging";
   const deployed = dep.available && dep.current_version != null;
 
   return [
@@ -60,12 +63,13 @@ function buildLifecycle(d, extra){
       value: met.roc_auc != null ? Number(met.roc_auc).toFixed(4) : null,
       detail:"primary metric at registration" },
     gate,
-    { state: stage ? (deployable ? "done" : "block") : "todo",
+    { state: stage ? (deployable || staged ? "done" : "block") : "todo",
       value: stage || null,
-      detail: deployable ? "reached a deployable stage"
+      detail: deployable ? "approved for live traffic"
+        : staged ? "approved for shadow evaluation only"
         : (stage ? "held in " + stage : "not registered") },
     { state: deployable ? "done" : "todo", value: deployable ? stage : null,
-      detail:"stage machine position" },
+      detail: staged ? "promote to Production to serve" : "stage machine position" },
     { state: deployed ? "now" : "todo",
       value: deployed ? `v${dep.current_version}` : null,
       detail: deployed ? `${dep.state || "deployed"} via ${dep.strategy || "?"}` : "not deployed" },
@@ -85,101 +89,129 @@ function buildLifecycle(d, extra){
 
 PAGES.overview = {
   title: "Command Center",
-  intro: "What is happening to the models right now. Every figure is read from "
-       + "the live API; sections that cannot report say so rather than showing a zero.",
+  intro: "What the platform is doing right now: every model, the decisions waiting on a human, the "
+       + "jobs in flight, and what just happened. Every figure is read from the live API.",
   refresh: 30000,
   async render(){
+    const models = await listModels();
+    const focus = currentModel(models || []);
+    const q = focus ? `?model=${encodeURIComponent(focus)}` : "";
     const r = await loadAll({
-      dash:    "/api/v1/dashboard",
+      dash:    `/api/v1/dashboard${q}`,
       ds:      "/api/v1/datasets",
       runs:    "/api/v1/training/runs?limit=1",
       automl:  "/api/v1/automl/runs?limit=1",
       alerts:  "/api/v1/alerts",
-      audit:   "/api/v1/audit?limit=200",
+      pending: "/api/v1/models/pending",
     }, 5000);
     if(!r.dash.ok) return errorState(r.dash.error, "overview");
     const d = r.dash.data;
+    const P = d.platform || {}, fleet = (d.models || {}).models || [], jobs = d.jobs || {};
+    const counts = jobs.counts || {};
+
+    /* -- 1. the platform, in counts ----------------------------------------- */
+    const stat = (n, label, href, meta) => `<a class="stat" href="${href}">
+      <span class="n">${n}</span><span class="l">${esc(label)}</span>${meta ? `<span class="m">${meta}</span>` : ""}</a>`;
+    const platform = P.available === false ? unavailable("Platform counts are unavailable.")
+      : `<div class="grid g6 statstrip">
+        ${stat(int(P.models), "models", "#/models", `${int(P.model_versions)} versions`)}
+        ${stat(int(P.datasets), "dataset versions", "#/datasets")}
+        ${stat(int(P.training_runs), "training runs", "#/training")}
+        ${stat(int(P.active_deployments), "live endpoints", "#/deployments")}
+        ${stat(int(P.predictions_7d), "predictions · 7d", "#/monitoring")}
+        ${stat(int((counts.running || 0) + (counts.queued || 0)), "jobs in flight", "#/jobs",
+               counts.failed ? `<span class="bad">${int(counts.failed)} failed</span>` : "")}
+      </div>`;
+
+    if(!fleet.length) return sect2("01", "Platform", "counts, not estimates") + platform
+      + card("Get started", `<ol class="steps">
+          <li><a href="#/datasets"><b>Upload a CSV</b></a><span>It is versioned by content and validated
+            against its own columns.</span></li>
+          <li><a href="#/newproject"><b>Train a model</b></a><span>Pick the column to predict; AutoML
+            trains candidates as a background job and registers the winner under your model name.</span></li>
+          <li><a href="#/gates"><b>Approve it</b></a><span>The gate checks the thresholds; a human signs
+            off where the environment requires it.</span></li>
+          <li><a href="#/deployments"><b>Deploy it</b></a><span>Onto the model's own endpoint, blue/green,
+            canary, shadow or direct.</span></li>
+          <li><a href="#/predict"><b>Score records</b></a><span>Against the input contract the model was
+            trained on — then record what really happened.</span></li>
+        </ol>`, { sub:"nothing is registered yet" });
+
+    /* -- 2. every model ------------------------------------------------------- */
+    const fleetCard = card("Models", table([
+      { label:"Model", render:m => `<a href="#/models/${encodeURIComponent(m.name)}"><b>${esc(m.name)}</b></a>` },
+      { label:"Predicts", render:m => m.target ? `<span class="mono">${esc(m.target)}</span>` : NA },
+      { label:"Serving", render:m => m.serving_version != null
+          ? `<span class="mono">v${int(m.serving_version)}</span> ${badge(m.serving_stage || "", m.serving_stage === "Production" ? "ok" : "info")}`
+          : `<span class="dim">not serving</span>` },
+      { label:"Endpoint", render:m => m.deployment_state ? runStatusBadge(m.deployment_state) : `<span class="dim">not deployed</span>` },
+      { label:"ROC-AUC", num:true, render:m => num(m.roc_auc, 4) },
+      { label:"Drift", render:m => m.last_drift_at == null ? `<span class="dim">no scan</span>`
+          : m.last_drift_detected ? badge("detected","warn") : badge("stable","ok") },
+      { label:"Waiting", num:true, render:m => m.awaiting_approval ? badge(String(m.awaiting_approval),"warn") : "" },
+    ], fleet, { empty:"" }), { flush:true, sub:`${fleet.length} model(s)`,
+      right:`<a class="btn sm" href="#/models">All models</a>` });
+
+    /* -- 3. what needs a decision -------------------------------------------- */
+    const pending = r.pending.ok ? r.pending.data.versions : [];
+    const failed = (jobs.recent || []).filter(j => j.status === "failed");
+    const alerts = r.alerts.ok ? r.alerts.data : null;
+    const decisions = card("Needs a decision", `
+      ${pending.length ? `<div class="aq">${pending.slice(0, 5).map(v => `<div class="row">
+          <span class="sev warning"></span><div>
+            <div class="ttl">${esc(v.name)} v${int(v.version)} is waiting for approval</div>
+            <div class="msg">Passed every automated check · ROC-AUC ${num((v.metrics||{}).roc_auc, 4)}</div>
+            <div class="meta">registered ${when(v.created_at)}</div></div>
+          <a class="btn sm" href="#/models/${encodeURIComponent(v.name)}/${v.version}?tab=evaluation">Review</a></div>`).join("")}</div>` : ""}
+      ${failed.length ? `<div class="aq">${failed.slice(0, 4).map(j => `<div class="row">
+          <span class="sev critical"></span><div>
+            <div class="ttl">${esc(String(j.kind).replace("_"," "))} job failed${j.model_name ? " · " + esc(j.model_name) : ""}</div>
+            <div class="msg">${esc(String(j.error || "").slice(0, 160))}</div>
+            <div class="meta">${when(j.finished_at || j.created_at)}</div></div>
+          <a class="btn sm" href="#/jobs/${encodeURIComponent(j.id)}">Open</a></div>`).join("")}</div>` : ""}
+      ${alerts === null ? unavailable("The alerts API could not be reached.")
+        : (pending.length || failed.length) && !alerts.filter(a => !a.acknowledged).length ? ""
+        : attentionQueue(alerts, { limit: 5 })}`,
+      { flush:true, sub:`${pending.length} approval(s) · ${failed.length} failed job(s) · ${
+        alerts ? alerts.filter(a => !a.acknowledged).length : "?"} open alert(s)` });
+
+    /* -- 4. the focus model ---------------------------------------------------- */
     const model = d.model || {}, dep = d.deployment || {}, svc = d.service || {};
-
-    /* -- 1. production health ------------------------------------------- */
-    const health = sect2("01", "Production health",
-      `${esc(model.model_name || "no model")} · ${esc(svc.environment || "?")}`)
-      + healthStrip(d);
-
-    /* -- 2. lifecycle --------------------------------------------------- */
-    const rail = sect2("02", "Model lifecycle", "derived from live API state")
-      + `<div class="card"><div class="body">${lifecycleRail(buildLifecycle(d, r))}
-        <p class="dim" style="margin:12px 0 0;font-size:12px">Each stop is derived from the
-          endpoint that owns it. A stop whose source did not answer stays unstarted —
+    const focusHead = `<div class="pagebar">${modelPicker(models, focus)}
+      <span class="dim" style="font-size:12.5px">${esc(svc.environment || "")} · endpoint
+        <span class="mono">${esc(dep.endpoint || "—")}</span></span></div>`;
+    const rail = `<div class="card"><div class="body">${lifecycleRail(buildLifecycle(d, r))}
+        <p class="dim" style="margin:12px 0 0;font-size:12px">Each stop is derived from the endpoint
+          that owns it, for this model. A stop whose source did not answer stays unstarted —
           completion is never inferred from the absence of an error.</p></div></div>`;
 
-    /* -- 3. attention + promotion --------------------------------------- */
-    const alerts = r.alerts.ok ? r.alerts.data : null;
-    const attention = card("Attention queue",
-      alerts === null ? unavailable("The alerts API could not be reached.")
-        : attentionQueue(alerts, { limit:6 }),
-      { flush:true, sub: alerts ? `${alerts.filter(a => !a.acknowledged).length} open` : "" });
+    /* -- 5. what just happened ------------------------------------------------- */
+    const events = ((d.activity || {}).events || []).slice(0, 10);
+    const activity = card("Recent activity", events.length ? `<div class="tl">${events.map(e => {
+        const bad = e.outcome === "failure" || e.outcome === "denied";
+        return `<div class="ev ${bad ? "bad" : "done"}"><span class="pip"></span>
+          <div><div class="when">${when(e.created_at)}</div>
+            <div class="what">${esc(String(e.action || "").replace(/[._]/g," "))}</div>
+            <div class="det">${esc(e.resource_id || "")}${e.actor ? " · " + esc(e.actor) : ""}${
+              bad ? " · " + esc(e.outcome) : ""}</div></div></div>`; }).join("")}</div>`
+      : emptyState("No activity recorded yet."), { flush:events.length > 0, sub:"from the audit log" });
 
-    const versions = model.versions || [];
-    /* Stage transitions are a separate call; without them the rail can show an
-       occupant but not who moved it, so fetch them when a model name exists. */
-    let history = [];
-    if(model.model_name){
-      try {
-        history = await api.get(
-          `/api/v1/models/${encodeURIComponent(model.model_name)}/history`, 15000);
-      } catch(e){ history = []; }
-    }
-    const promo = card("Promotion rail",
-      model.available
-        ? promotionRail(versions, history)
-          + `<p class="dim" style="margin:12px 0 0;font-size:12px">Occupancy of each stage in
-             the registry. Open a version to see who moved it and why.</p>`
-        : unavailable("The registry reported no model."),
-      { sub: model.total_versions != null ? `${model.total_versions} version(s)` : "" });
+    const recentJobs = card("Jobs", (jobs.recent || []).length ? table([
+      { label:"Job", render:j => `<a class="mono" href="#/jobs/${encodeURIComponent(j.id)}">${esc(String(j.id).slice(4, 14))}</a>` },
+      { label:"Kind", render:j => esc(String(j.kind).replace("_"," ")) },
+      { label:"Model", render:j => esc(j.model_name || "—") },
+      { label:"Status", render:j => runStatusBadge(j.status) },
+      { label:"Queued", render:j => `<span class="dim">${esc(ago(j.created_at))}</span>` },
+    ], jobs.recent, { empty:"" }) : emptyState("No jobs have run yet."),
+      { flush:true, sub:"training · automl · retraining · deployment · drift",
+        right:`<a class="btn sm" href="#/jobs">All jobs</a>` });
 
-    /* -- 4. operations + deployment ------------------------------------- */
-    const MODEL_ACTIONS = ["model.registered","model.transitioned","model.promoted",
-      "deployment.created","deployment.rolled_back","automl.run_completed",
-      "training.completed","dataset.uploaded"];
-    const audit = r.audit.ok ? (r.audit.data.entries || r.audit.data.audit || []) : null;
-    const ops = audit === null ? unavailable("The audit API could not be reached.")
-      : (() => {
-          const rows = audit.filter(e => MODEL_ACTIONS.some(a =>
-            String(e.action || "").startsWith(a.split(".")[0] + "."))).slice(0, 8);
-          if(!rows.length) return emptyState("No model operations recorded yet.");
-          return `<div class="tl">` + rows.map(e => {
-            const bad = String(e.outcome || "") === "failure";
-            return `<div class="ev ${bad ? "bad" : "done"}">
-              <span class="pip"></span>
-              <div><div class="when">${when(e.created_at)}</div>
-                <div class="what">${esc(String(e.action || "").replace(/[._]/g," "))}</div>
-                <div class="det">${esc(e.resource_id || "")}${
-                  e.actor ? " · " + esc(e.actor) : ""}</div></div></div>`;
-          }).join("") + `</div>`;
-        })();
-
-    const depCard = card("Deployment state", dep.available === false
-      ? unavailable("No deployment has been created for this endpoint.")
-      : `<div class="grid g4">
-          ${kpi("Endpoint", `<span class="mono">${esc(dep.endpoint || "-")}</span>`)}
-          ${kpi("Serving", dep.current_version != null
-            ? `<span class="mono">v${int(dep.current_version)}</span>` : NA,
-            dep.previous_version != null ? `previous v${dep.previous_version}` : "no previous")}
-          ${kpi("Strategy", dep.strategy ? badge(dep.strategy, "mute") : NA)}
-          ${kpi("Provider", esc(dep.provider || "-"),
-            svc.aws_enabled ? "AWS integration on" : "in-process, not an AWS ML service")}
-        </div>
-        ${dep.checks ? `<div class="checks" style="margin-top:14px">${
-          Object.entries(dep.checks).map(([k,v]) =>
-            `<span class="c ${v ? "" : "no"}">${v ? "✓" : "✕"} ${esc(k)}</span>`).join("")}</div>` : ""}`,
-      { right:`<a class="btn" href="#/deployments">Deployment Room</a>` });
-
-    return health + rail
-      + sect2("03", "Needs a decision", "alerts and stage occupancy")
-      + `<div class="grid g2">${attention}${promo}</div>`
-      + sect2("04", "Recent activity", "model-affecting operations")
-      + `<div class="grid g2">${card("Recent model operations", ops,
-          { flush:true, sub:"from the audit log" })}${depCard}</div>`;
+    return sect2("01", "Platform", "counts, not estimates") + platform
+      + sect2("02", "Models and decisions", "what serves, and what waits on you")
+      + `<div class="grid g2">${fleetCard}${decisions}</div>`
+      + sect2("03", `Focus: ${esc(focus || "—")}`, "one model's lifecycle, end to end")
+      + focusHead + healthStrip(d) + rail
+      + sect2("04", "Recent activity", "audit log and jobs")
+      + `<div class="grid g2">${activity}${recentJobs}</div>`;
   }
 };

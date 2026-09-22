@@ -35,12 +35,13 @@ function wireProject(){
   wireTarget();
   wireStart();
   wireDrawer();
-  wireGate();
+  wireModelActions();
   wireDeploy();
-  wirePredict();
+  if($("#predform")) wirePredictForm();
 
   const poll = $("#prjpoll");
   if(poll) pollRunStep(poll.dataset.run, 0);
+  if(PRJ.jobId && document.getElementById(`job-${PRJ.jobId}`)) followJob(PRJ.jobId);
 }
 
 
@@ -153,8 +154,12 @@ function wireTarget(){
   };
   const clear = $("#prjcleartarget");
   if(clear) clear.onclick = () => {
-    PRJ.target = null; PRJ.problemSupported = null; prjSave(); render();
+    PRJ.target = null; PRJ.problemSupported = null; PRJ.positive = ""; prjSave(); render();
   };
+  const name = $("#prjname");
+  if(name) name.oninput = () => { PRJ.nameAsked = name.value.trim(); prjSave(); };
+  const pos = $("#prjpos");
+  if(pos) pos.onchange = () => { PRJ.positive = pos.value; prjSave(); };
 }
 
 
@@ -173,10 +178,19 @@ function wireStart(){
   boxes.forEach(b => b.onchange = sync);
   if(boxes.length) sync();
 
+  /* Both routes send the target, the model name and the positive class the
+     target step recorded, so manual training trains the same problem AutoML
+     would have. */
+  const naming = () => ({
+    target_column: PRJ.target,
+    model_name: PRJ.nameAsked || null,
+    positive_label: PRJ.positive || null,
+  });
+
   const auto = $("#prjstartautoml");
   if(auto) auto.onclick = () => startRun("automl", {
     dataset_version: PRJ.version,
-    target_column: PRJ.target,
+    ...naming(),
     algorithms: boxes.filter(b => b.checked).map(b => b.value),
     primary_metric: PRJ.primaryMetric || "roc_auc",
     tune: false,
@@ -187,6 +201,7 @@ function wireStart(){
   const man = $("#prjstartmanual");
   if(man) man.onclick = () => startRun("training", {
     dataset_version: PRJ.version,
+    ...naming(),
     algorithm: ($("#prjalgo") && $("#prjalgo").value) || null,
     tune: !!($("#prjtune") && $("#prjtune").checked),
     promote: true,
@@ -207,12 +222,13 @@ async function startRun(kind, payload){
   const needsKey = await authRequired();
   const proceed = await confirmAction({
     title: kind === "automl" ? "Start AutoML" : "Start training",
-    body: kind === "automl"
+    body: (kind === "automl"
       ? `Train ${payload.algorithms.length} candidate model(s) on ${PRJ.version}, target `
-        + `${PRJ.target}. The best is registered and then judged by the approval gate — `
-        + `promotion into ${stage} is not automatic.`
-      : `Train ${payload.algorithm || "the configured default"} on ${PRJ.version}. The model is `
-        + `registered and judged by the approval gate — promotion into ${stage} is not automatic.`,
+        + `${PRJ.target}. The best is registered`
+      : `Train ${payload.algorithm || "the configured default"} on ${PRJ.version}, target `
+        + `${PRJ.target}. The model is registered`)
+      + ` as a version of ${payload.model_name || "an automatically named model"} and judged by `
+      + `the approval gate — promotion into ${stage} is not automatic.`,
     confirm: kind === "automl" ? "Start AutoML" : "Start training", needsKey,
   });
   if(!proceed) return;
@@ -226,10 +242,13 @@ async function startRun(kind, payload){
     PRJ.mode = kind === "automl" ? "automl" : "manual";
     PRJ.runKind = kind;
     PRJ.runId = res.run_id;
+    PRJ.jobId = res.job_id || null;
+    PRJ.modelName = res.model_name || null;
     PRJ.runStatus = res.status || "queued";
     PRJ.modelVersion = null; PRJ.gateDecision = null; PRJ.deployedVersion = null;
+    PRJ.registeredStage = null;
     prjSave(); api.bust();
-    toast("Run started.", "ok");
+    toast(`Queued${PRJ.modelName ? " for " + PRJ.modelName : ""}.`, "ok");
     goStep(5);
     render();
   } catch(e){
@@ -328,124 +347,47 @@ function closeDrawer(){
 }
 
 
-/* --- 07 gate ------------------------------------------------------------ */
-function wireGate(){
-  const btn = $("#prjrungate");
-  if(!btn) return;
-  btn.onclick = async () => {
-    const key = ($("#prjgatekey") && $("#prjgatekey").value) || "";
-    if(!key){ toast("Enter an API key.", "bad"); return; }
-    btn.disabled = true;
-    try {
-      await api.post(`/api/v1/models/${encodeURIComponent(PRJ.modelName)}`
-        + `/versions/${PRJ.modelVersion}/evaluate-gate`, null, key);
-      api.bust(); render();
-    } catch(e){
-      toast(e.status === 401 || e.status === 403
-        ? "The API key was not accepted." : e.message, "bad");
-      btn.disabled = false;
-    }
-  };
-}
+/* --- 07 approval ------------------------------------------------------- */
+/* Approve / Reject use the model page's own handlers (wireModelActions), so
+   the workflow and the registry cannot disagree about what approval means. */
 
 
 /* --- 08 deploy ---------------------------------------------------------- */
+/* The rollout is a job: the button queues it, the panel streams its log, and
+   the step is re-rendered from the endpoint's real state once it finishes. */
 function wireDeploy(){
   const btn = $("#prjdeploy");
   if(!btn) return;
   btn.onclick = async () => {
     const strategy = ($("#prjstrategy") && $("#prjstrategy").value) || "blue_green";
-    const needsKey = await authRequired();
-    const proceed = await confirmAction({
-      title: "Deploy model version",
-      body: `Roll ${PRJ.modelName} v${PRJ.modelVersion} onto the serving endpoint using the `
-          + `${strategy.replace(/_/g," ")} strategy. This changes what live traffic is scored by.`,
-      confirm: "Deploy", needsKey,
+    const res = await runAction({
+      title: `Deploy ${PRJ.modelName} v${PRJ.modelVersion}`,
+      body: `Roll this version onto ${PRJ.modelName}'s endpoint with the `
+          + `${strategy.replace(/_/g," ")} strategy. This changes what that endpoint's traffic is scored by.`,
+      confirm: "Deploy",
+      path: "/api/v1/deployments",
+      payload: { model_name: PRJ.modelName, model_version: PRJ.modelVersion, strategy,
+                 reason: "deployed from the guided build workflow" },
+      success: "Deployment queued.",
+      after: () => {},
     });
-    if(!proceed) return;
-    if(needsKey && !proceed.key){ toast("An API key is required to deploy.", "bad"); return; }
-
-    btn.disabled = true; btn.textContent = "Deploying…";
-    try {
-      const res = await api.post("/api/v1/deployments", {
-        model_name: PRJ.modelName,
-        model_version: PRJ.modelVersion,
-        strategy,
-        reason: "deployed from the guided build workflow",
-      }, proceed.key);
-      PRJ.deployedVersion = PRJ.modelVersion; prjSave(); api.bust();
-      toast("Deployment created.", "ok");
-      $("#prjdeployresult").innerHTML =
-        `<div class="note" style="border-color:var(--ok-line);background:var(--ok-bg)">
-          <b>Deployed.</b><br><span style="font-size:12.5px">
-          ${esc(res.detail || res.message || "The deployment API accepted the rollout.")}</span></div>`;
-      render();
-    } catch(e){
-      const msg = (e.status === 401 || e.status === 403)
-        ? "Rejected: the API key was missing or not accepted." : e.message;
-      $("#prjdeployresult").innerHTML =
-        `<div class="note" style="border-color:var(--bad-line);background:var(--bad-bg)">
-          <b>Deployment refused.</b><br><span style="font-size:12.5px">${esc(msg)}</span></div>`;
-      toast(msg, "bad");
-      btn.disabled = false; btn.textContent = "Deploy this version";
+    if(!res || !res.job) return;
+    btn.disabled = true;
+    const box = $("#prjdeployresult");
+    box.innerHTML = jobPanel(res.job);
+    const done = await followJob(res.job.id);
+    if(!done) return;
+    if(done.status === "succeeded"){
+      PRJ.deployedVersion = PRJ.modelVersion; prjSave();
+      toast("Deployment finished.", "ok");
+    } else {
+      toast(`Deployment ${done.status}.`, "bad");
+      box.insertAdjacentHTML("beforeend", `<div class="note bad" style="margin-top:10px">
+        <b>The rollout did not complete (${esc(done.status)}).</b><br>
+        <span style="font-size:12.5px">${esc(done.error || "See the job log above.")}</span></div>`);
+      btn.disabled = false;
+      return;
     }
-  };
-}
-
-
-/* --- 09 predict --------------------------------------------------------- */
-function wirePredict(){
-  const btn = $("#prjpredict");
-  if(!btn) return;
-  btn.onclick = async () => {
-    const features = {};
-    let bad = null;
-    document.querySelectorAll(".prjfeat").forEach(i => {
-      const raw = i.value.trim();
-      if(raw === ""){ bad = bad || `${i.dataset.f} is empty.`; return; }
-      if(i.dataset.num === "1"){
-        const n = Number(raw);
-        if(!isFinite(n)){ bad = bad || `${i.dataset.f} is not a number.`; return; }
-        features[i.dataset.f] = n;
-      } else features[i.dataset.f] = raw;
-    });
-    if(bad){ toast(bad, "bad"); return; }
-
-    const needsKey = await authRequired();
-    let key = null;
-    if(needsKey){
-      const proceed = await confirmAction({
-        title: "Score a record", body: "Sends one request to the live prediction endpoint.",
-        confirm: "Score", needsKey: true,
-      });
-      if(!proceed) return;
-      if(!proceed.key){ toast("An API key is required.", "bad"); return; }
-      key = proceed.key;
-    }
-
-    btn.disabled = true; btn.textContent = "Scoring…";
-    try {
-      const r = await api.post("/api/v1/predict", { features }, key);
-      $("#prjpredresult").innerHTML = card("Response", `
-        <div class="grid g4">
-          ${kpi("Prediction", `<b>${esc(r.prediction_label)}</b>`, `class ${int(r.prediction)}`)}
-          ${kpi("Probability", num(r.probability, 4), `threshold ${num(r.threshold, 2)}`)}
-          ${kpi("Served by", `<span class="mono">v${int(r.model_version)}</span>`,
-            `${esc(r.model_stage||"")} · ${esc(r.variant||"primary")}`)}
-          ${kpi("Latency", ms(r.inference_latency_ms))}
-        </div>
-        <p class="dim" style="margin:12px 0 0;font-size:12.5px">The version and variant above are
-          what actually served this request, not what the registry says is current.</p>`,
-        { flush:true });
-    } catch(e){
-      const msg = (e.status === 401 || e.status === 403)
-        ? "Rejected: the API key was missing or not accepted." : e.message;
-      $("#prjpredresult").innerHTML =
-        `<div class="note" style="border-color:var(--bad-line);background:var(--bad-bg)">
-          <b>The endpoint rejected this request.</b><br>
-          <span style="font-size:12.5px">${esc(msg)}</span></div>`;
-    } finally {
-      btn.disabled = false; btn.textContent = "Score";
-    }
+    api.bust(); render();
   };
 }

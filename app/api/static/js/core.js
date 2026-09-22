@@ -352,19 +352,31 @@ function trapFocus(container, onEscape){
   };
 }
 
+/* A key the viewer chose to keep for this tab. It lives in this variable only:
+   never localStorage, sessionStorage, a cookie or the URL, and a reload drops
+   it. It exists because asking for the key on every prediction is hostile,
+   and the only place it is safe to keep is memory the page already owns. */
+let MEMORY_KEY = "";
+
 function confirmAction(opts){
   return new Promise(resolve => {
     const m = document.createElement("div");
     m.className = "modal";
     const titleId = `acT${++COPY_SEQ}`;
+    const askKey = opts.needsKey && !MEMORY_KEY;
     m.innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
       <div class="body" style="padding:16px">
         <h3 id="${titleId}">${esc(opts.title)}</h3>
         <p style="color:var(--ink-2);margin:8px 0 12px;font-size:12.5px">${esc(opts.body)}</p>
-        ${opts.needsKey ? `<label style="font-size:11.5px;color:var(--ink-3)">API key (X-API-Key)</label>
+        ${opts.extra || ""}
+        ${askKey ? `<label for="ackey" style="font-size:11.5px;color:var(--ink-3)">API key (X-API-Key)</label>
           <input type="password" id="ackey" autocomplete="off" placeholder="required for write actions">
+          <label class="chk" style="margin-top:8px"><input type="checkbox" id="ackeep">
+            Keep in this tab's memory until reload</label>
           <p style="font-size:11px;color:var(--ink-3);margin:6px 0 0">
-            Used for this request only. Not stored anywhere in the browser.</p>` : ""}
+            Never written to browser storage, a cookie or the URL.</p>`
+          : opts.needsKey ? `<p class="dim" style="font-size:11.5px;margin:0">Using the API key kept
+            in this tab's memory. <button class="linkbtn" id="acforget">Forget it</button></p>` : ""}
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
           <button class="btn" id="acno">Cancel</button>
           <button class="btn ${opts.danger?"danger":"pri"}" id="acyes">${esc(opts.confirm||"Confirm")}</button>
@@ -373,48 +385,160 @@ function confirmAction(opts){
     document.body.appendChild(m);
     const release = trapFocus(m, () => done(null));
     const done = v => { release(); m.remove(); resolve(v); };
+    const forget = $("#acforget", m);
+    if(forget) forget.onclick = () => { MEMORY_KEY = ""; toast("Key forgotten."); done(null); };
     $("#acno", m).onclick = () => done(null);
-    $("#acyes", m).onclick = () => done({ key: opts.needsKey ? ($("#ackey", m).value || "") : "" });
+    $("#acyes", m).onclick = () => {
+      const fields = {};
+      m.querySelectorAll("[data-field]").forEach(el => { fields[el.dataset.field] = el.value; });
+      let key = "";
+      if(opts.needsKey){
+        key = askKey ? ($("#ackey", m).value || "") : MEMORY_KEY;
+        if(askKey && key && $("#ackeep", m).checked) MEMORY_KEY = key;
+      }
+      done({ key, fields });
+    };
     m.onclick = e => { if(e.target === m) done(null); };
   });
 }
+
+/* Confirm, send, report. Returns the response body (or undefined when the
+   viewer cancelled or the call failed) so callers can follow a job it queued.
+   `payload` may be a function of the dialog's `data-field` inputs. */
 async function runAction(opts){
-  if(opts.needsKey) opts = { ...opts, needsKey: await authRequired() };
+  if(opts.needsKey !== false) opts = { ...opts, needsKey: await authRequired() };
   const c = await confirmAction(opts);
-  if(!c) return;
-  if(opts.needsKey && !c.key){ toast("An API key is required for this action.", "bad"); return; }
+  if(!c) return undefined;
+  if(opts.needsKey && !c.key){ toast("An API key is required for this action.", "bad"); return undefined; }
+  const payload = typeof opts.payload === "function" ? opts.payload(c.fields) : opts.payload;
   try {
-    await api.post(opts.path, opts.payload, c.key);
+    const res = await api.post(opts.path, payload, c.key);
     api.bust();
     toast(opts.success || "Action completed.", "ok");
-    render();
+    if(opts.after) await opts.after(res);
+    else render();
+    return res;
   } catch(e){
+    if(e.status === 401 || e.status === 403) MEMORY_KEY = "";
     toast((e.status === 401 || e.status === 403)
       ? "Rejected: the API key was missing or not accepted."
       : `Failed: ${e.message}`, "bad");
+    return undefined;
   }
+}
+
+/* ---------------------------------------------------------- model context */
+/* Which model an operational page is about. An explicit ?model= in the URL
+   wins, so views are linkable; then the viewer's last choice (a UI preference,
+   kept like the theme); then the first registered model. */
+const MODEL_PREF = "fmops-model";
+
+function hashQuery(){ return new URLSearchParams(location.hash.split("?")[1] || ""); }
+
+async function listModels(){
+  try { return (await api.get("/api/v1/models", 8000)).models || []; }
+  catch(e){ return null; }
+}
+
+function currentModel(models){
+  const names = (models || []).map(m => m.name);
+  const asked = hashQuery().get("model");
+  if(asked && names.includes(asked)) return asked;
+  let saved = null;
+  try { saved = localStorage.getItem(MODEL_PREF); } catch(e){ saved = null; }
+  if(saved && names.includes(saved)) return saved;
+  return names[0] || null;
+}
+
+function modelPicker(models, current){
+  if(!models || !models.length) return "";
+  return `<label class="mpick" for="modelpick"><span>Model</span>
+    <select id="modelpick">${models.map(m => `<option value="${esc(m.name)}"
+      ${m.name === current ? "selected" : ""}>${esc(m.name)}${
+      m.serving_version != null ? ` · v${m.serving_version} ${esc(m.serving_stage || "")}` : " · not serving"
+    }</option>`).join("")}</select></label>`;
+}
+
+function wireModelPicker(){
+  const pick = $("#modelpick");
+  if(!pick) return;
+  pick.onchange = () => {
+    try { localStorage.setItem(MODEL_PREF, pick.value); } catch(e){ /* private mode */ }
+    const [path, query] = location.hash.split("?");
+    const q = new URLSearchParams(query || "");
+    q.set("model", pick.value);
+    location.hash = `${path}?${q}`;
+  };
+}
+
+/* A page that needs "the" model: resolve it, or explain that none exists. */
+async function withModel(render){
+  const models = await listModels();
+  if(models === null) return errorState("The model registry could not be reached.", location.hash);
+  const name = currentModel(models);
+  if(!name) return card("No models yet", `<div class="state"><div class="big">Nothing is registered</div>
+    Upload a dataset and train a model to see it here.
+    <div style="margin-top:12px"><a class="btn pri" href="#/newproject">New ML Project</a></div></div>`);
+  return render(name, models);
+}
+
+/* ------------------------------------------------------------------ jobs */
+const JOB_TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+
+function jobBadge(status){ return runStatusBadge(status); }
+
+/* A live panel for one job: status, and its log as it is written. Render the
+   markup, then call followJob(jobId) once it is in the DOM. */
+function jobPanel(job, opts){
+  const o = opts || {};
+  return `<div class="jobpanel" id="job-${esc(job.id)}" data-job="${esc(job.id)}">
+    <div class="jobhead">
+      <span class="jobstate">${jobBadge(job.status)}</span>
+      <span class="mono dim">${esc(job.kind)} · ${esc(job.id)}</span>
+      <span class="spacer"></span>
+      <a class="btn sm" href="#/jobs/${esc(job.id)}">Open job</a>
+    </div>
+    <pre class="joblog" aria-live="polite" aria-label="Job log">${esc(o.placeholder || "Waiting for the worker…")}</pre>
+    <div class="jobout"></div></div>`;
+}
+
+/* Poll a job and stream its log into its panel until it finishes. Resolves
+   with the final job. Stops quietly if the panel leaves the page. */
+async function followJob(jobId, onDone){
+  let after = 0, first = true, job = null;
+  for(;;){
+    const panel = document.getElementById(`job-${jobId}`);
+    try {
+      job = await api.get(`/api/v1/jobs/${encodeURIComponent(jobId)}`, 0);
+      const logs = await api.get(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs?after=${after}`, 0);
+      if(panel){
+        const pre = panel.querySelector(".joblog");
+        if(logs.lines.length){
+          if(first){ pre.textContent = ""; first = false; }
+          pre.textContent += logs.lines.map(l =>
+            `${String(l.created_at || "").slice(11, 19)}  ${l.level.padEnd(7)} ${l.message}`
+            + (l.context && Object.keys(l.context).length
+                ? "  " + JSON.stringify(l.context).slice(0, 220) : "")).join("\n") + "\n";
+          pre.scrollTop = pre.scrollHeight;
+        }
+        after = logs.next_after;
+        panel.querySelector(".jobstate").innerHTML = jobBadge(job.status);
+      }
+    } catch(e){
+      if(panel) panel.querySelector(".jobstate").innerHTML = badge("unreachable", "bad");
+    }
+    if(!panel || (job && JOB_TERMINAL.has(job.status))) break;
+    await new Promise(r => setTimeout(r, 1200));
+  }
+  if(job && JOB_TERMINAL.has(job.status)){
+    announce(`Job ${job.kind} ${job.status}`);
+    if(onDone) await onDone(job);
+  }
+  return job;
 }
 
 /* ------------------------------------------------------------- pages ---- */
 const PAGES = {};
-
-/* ---- Overview ---------------------------------------------------------- */
-/* ---- Datasets ---------------------------------------------------------- */
-/* ---- AutoML ------------------------------------------------------------ */
-/* ---- Wizard steps 2-4 -------------------------------------------------- */
-/* ---- Run detail / leaderboard ------------------------------------------ */
-/* ---- Training ---------------------------------------------------------- */
-/* ---- Evaluation -------------------------------------------------------- */
-/* ---- Models ------------------------------------------------------------ */
-/* ---- Experiments ------------------------------------------------------- */
-/* ---- Deployments ------------------------------------------------------- */
-/* ---- Monitoring -------------------------------------------------------- */
-/* ---- Drift ------------------------------------------------------------- */
-/* ---- Retraining -------------------------------------------------------- */
-/* ---- Champion / Challenger --------------------------------------------- */
-/* ---- LLMOps ------------------------------------------------------------ */
-/* ---- Audit ------------------------------------------------------------- */
-/* ---- System ------------------------------------------------------------ */
 
 
 /* A named loading state beats an anonymous shimmer: it tells the reader what
@@ -551,8 +675,9 @@ function promotionRail(versions, history){
  * Lineage as navigation. A rejected version stays visibly rejected: the point
  * of this strip is that the registry must not look artificially green.
  */
-function versionRail(versions, current, metric){
+function versionRail(versions, current, metric, modelName){
   const vs = (versions || []).slice().sort((a,b) => b.version - a.version);
+  const name = modelName || (vs[0] && vs[0].name) || "";
   if(!vs.length) return emptyState("No versions registered.");
   const key = metric || "roc_auc";
   return `<div class="vrail">` + vs.map(v => {
@@ -562,7 +687,7 @@ function versionRail(versions, current, metric){
       : (st === "Staging" || st === "Validation") ? "stage" : "";
     const on = String(v.version) === String(current) ? "on" : "";
     const score = (v.metrics || {})[key];
-    return `<a class="${cls} ${on}" href="#/models/${encodeURIComponent(v.version)}"
+    return `<a class="${cls} ${on}" href="#/models/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}"
         title="${esc(v.algorithm || "")}">
       <div class="vn">v${esc(String(v.version))}</div>
       <div class="vs">${esc(rejected ? "rejected" : st || "unknown")}</div>
@@ -707,6 +832,10 @@ const ICON_PATHS = {
   sortDesc:  "M7 9l5 5 5-5",
   sortNone:  "M8 10l4-4 4 4M8 14l4 4 4-4",
   close:     "M6 6l12 12M18 6 6 18",
+  clock:     "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+  target:    "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM12 11.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6z",
+  check2:    "M4 12.5 9 17.5 20 6.5",
+  stop:      "M7 7h10v10H7z",
 };
 
 /* 16px default: it sits on the cap height of 13px UI text without optical

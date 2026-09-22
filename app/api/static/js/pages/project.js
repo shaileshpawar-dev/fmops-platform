@@ -17,10 +17,13 @@
  *      The registry step therefore reports what the run did; it does not
  *      offer an action the API has no endpoint for.
  *
- *   2. Online prediction is bound to one fixed request schema. A model
- *      trained on differently-shaped data cannot be exercised through
- *      /api/v1/predict, and the predict step says so instead of rendering a
- *      form that would 422.
+ *   2. The model is named before training, not after. A run registers its
+ *      winner under the name chosen in the target step, and every later step
+ *      -- approval, deployment, prediction, monitoring -- reads that model by
+ *      name. Nothing assumes the platform has only one model.
+ *
+ * The predict step builds its form from the input contract recorded with the
+ * serving version, so a model trained on any dataset can be scored here.
  */
 
 const STEPS = [
@@ -51,7 +54,8 @@ function prjBlank(){
   return { version:null, datasetName:null, rows:null, columns:null, columnNames:[],
            validation:null, profile:null, target:null, problemType:null,
            problemSupported:null, primaryMetric:null, mode:null, runKind:null,
-           runId:null, runStatus:null, modelName:null, modelVersion:null,
+           runId:null, runStatus:null, jobId:null, nameAsked:"", positive:"",
+           modelName:null, modelVersion:null,
            registeredStage:null, gateDecision:null, deployedVersion:null };
 }
 
@@ -84,9 +88,11 @@ function stepState(n){
     case 6:  if(!p.runId || failed) return "locked";
              return p.modelVersion ? "done" : (stepState(5) === "done" ? "todo" : "locked");
     case 7:  if(!p.modelVersion) return "locked";
-             return p.gateDecision ? (p.gateDecision === "approved" ? "done" : "fail") : "todo";
+             if(p.gateDecision === "approved") return "done";
+             return !p.gateDecision || p.gateDecision === "pending_manual" ? "todo" : "fail";
     case 8:  if(!p.modelVersion) return "locked";
-             return p.deployedVersion ? "done" : "todo";
+             if(p.deployedVersion === p.modelVersion) return "done";
+             return p.registeredStage === "Production" ? "todo" : "locked";
     case 9:  return p.deployedVersion ? "todo" : "locked";
     case 10: return p.deployedVersion ? "todo" : "locked";
   }
@@ -193,46 +199,19 @@ function runDone(status){ return RUN_TERMINAL.includes(status); }
 /* Record what the run actually produced. Called from both the poller and the
    step renderer so a reload picks up a run that finished while away. */
 
+/* The model name always comes from the run record -- the name the backend
+   registered under -- never from a guess over the registry. */
 function absorbRun(run){
   PRJ.runStatus = run.status;
+  if(run.model_name) PRJ.modelName = run.model_name;
   if(PRJ.runKind === "automl"){
     if(run.best_model_version != null) PRJ.modelVersion = run.best_model_version;
     const promo = run.promotion || null;
     if(promo && promo.decision) PRJ.gateDecision = promo.decision;
   } else {
     if(run.model_version != null) PRJ.modelVersion = run.model_version;
-    if(run.model_name) PRJ.modelName = run.model_name;
   }
   prjSave();
-}
-
-async function ensureModelName(){
-  if(PRJ.modelName) return PRJ.modelName;
-  try {
-    const models = await api.get("/api/v1/models", 15000);
-    const names = (models.models || []).map(m => typeof m === "string" ? m : m.name);
-    PRJ.modelName = names[0] || null;
-    prjSave();
-  } catch(e){ /* caller renders the unavailable state */ }
-  return PRJ.modelName;
-}
-
-async function predictSchema(){
-  const doc = await api.get("/openapi.json", 300000);
-  const schemas = (doc.components && doc.components.schemas) || {};
-  const body = ((((doc.paths || {})["/api/v1/predict"] || {}).post || {}).requestBody || {});
-  const ref = (((body.content || {})["application/json"] || {}).schema || {}).$ref || "";
-  const reqName = ref.split("/").pop();
-  const req = schemas[reqName] || {};
-  const featRef = ((req.properties || {}).features || {}).$ref
-    || (((req.properties || {}).features || {}).allOf || [{}])[0].$ref || "";
-  const feat = schemas[featRef.split("/").pop()] || null;
-  if(!feat || !feat.properties) return null;
-  return {
-    name: featRef.split("/").pop(),
-    required: feat.required || Object.keys(feat.properties),
-    properties: feat.properties,
-  };
 }
 
 

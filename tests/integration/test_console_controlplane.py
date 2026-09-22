@@ -130,11 +130,23 @@ def test_incidents_page_states_its_real_scope(api_client):
     assert "no assignment" in body, "the incidents page overstates its lifecycle"
 
 
-def test_quality_gates_admits_it_has_no_decision_history(api_client):
-    """There is no gate-collection endpoint; the page must not imply one."""
+def test_approvals_page_reads_the_recorded_decision_history(api_client):
+    """Gate decisions are persisted, and the page shows them from the API.
+
+    It once had to admit there was no decision history. There is now one --
+    every automated verdict and human sign-off -- and the page must read it
+    rather than reconstruct it in the browser.
+    """
     body = _joined(api_client)
     assert "PAGES.gates =" in body
-    assert "What this page cannot show" in body
+    assert "/api/v1/models/decisions" in body
+    assert "/api/v1/models/pending" in body
+
+    decisions = api_client.get("/api/v1/models/decisions")
+    assert decisions.status_code == 200
+    assert isinstance(decisions.json()["decisions"], list)
+    pending = api_client.get("/api/v1/models/pending")
+    assert pending.status_code == 200
 
 
 def test_absent_baseline_is_not_rendered_as_a_zero_score(api_client):

@@ -1,5 +1,5 @@
 const AUTOML = { version: null, profile: null, target: null, selection: [], tune: false,
-                 stage: "Staging", metric: "roc_auc" };
+                 stage: "Staging", metric: "roc_auc", name: "", positive: "" };
 
 PAGES.automl = {
   title: "AutoML",
@@ -123,14 +123,14 @@ function renderWizard(d){
             `<option value="${esc(m)}" ${m===AUTOML.metric?"selected":""}>${esc(m)}</option>`).join("")}</select></div>
         <div><label class="lbl" for="amstage">If the gate passes</label>
           <select id="amstage">
-            <option value="Staging">Promote to Staging</option>
-            <option value="Production">Promote to Production</option>
+            <option value="Staging" ${AUTOML.stage === "Staging" ? "selected" : ""}>Promote to Staging — shadow evaluation only</option>
+            <option value="Production" ${AUTOML.stage === "Production" ? "selected" : ""}>Promote to Production — may take live traffic once it beats the live version</option>
           </select></div>
       </div>`
-    : `<div class="note" style="border-color:var(--bad-line);background:var(--bad-bg)">
-        <b>This platform trains binary classification only.</b> The training stack casts the label to
-        an integer and evaluates with ROC-AUC over two classes, so a
-        ${esc((d.problem_type||"").replace(/_/g," "))} target cannot be fitted here. Pick a different
+    : `<div class="note bad">
+        <b>This platform trains binary classification only.</b> Evaluation, the approval gate, drift
+        on predictions and live quality are all defined over two classes, so a
+        ${esc((d.problem_type||"").replace(/_/g," "))} target cannot be trained here. Pick a different
         target column, or use a dataset whose label has two classes.</div>`}`,
     { sub:"step 3 of 4" });
 
@@ -154,8 +154,20 @@ function renderWizard(d){
       Unavailable here: ${cands.filter(c=>!c.available).map(c=>
         `<span class="mono">${esc(c.label)}</span>`).join(", ")}
       — ${esc(cands.filter(c=>!c.available)[0].unavailable_reason||"")}</p>`:""}
+    <div class="grid g2" style="margin-top:14px">
+      <div><label class="lbl" for="amname">Model name</label>
+        <input id="amname" maxlength="64" autocomplete="off" value="${esc(AUTOML.name)}"
+          placeholder="${esc(suggestedName(AUTOML.target))}">
+        <span class="hint">The winner becomes a version of this model. A name keeps one target for
+          life; a new target needs a new name.</span></div>
+      <div><label class="lbl" for="ampos">Positive class</label>
+        <select id="ampos"><option value="">automatic — yes/true/1, else the rarer class</option>
+          ${Object.keys((target && target.column === AUTOML.target ? target.class_balance : null) || {}).map(k =>
+            `<option value="${esc(k)}" ${k === AUTOML.positive ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
+        <span class="hint">What the model's probability is the probability of.</span></div>
+    </div>
     <div style="display:flex;gap:14px;align-items:center;margin-top:14px;flex-wrap:wrap">
-      <label style="display:flex;gap:7px;align-items:center;cursor:pointer">
+      <label class="chk">
         <input type="checkbox" id="amtune"> Run hyperparameter search per candidate</label>
       <span class="dim" id="amcount"></span>
       <span class="spacer"></span>
@@ -272,6 +284,8 @@ function wireWizard(){
   };
 
   const metric = $("#ammetric"); if(metric) metric.onchange = () => { AUTOML.metric = metric.value; };
+  const nameIn = $("#amname");   if(nameIn) nameIn.oninput  = () => { AUTOML.name = nameIn.value.trim(); };
+  const posIn = $("#ampos");     if(posIn)  posIn.onchange  = () => { AUTOML.positive = posIn.value; };
   const stage = $("#amstage");   if(stage)  stage.onchange  = () => { AUTOML.stage  = stage.value; };
   const tune = $("#amtune");     if(tune)   tune.onchange   = () => { AUTOML.tune   = tune.checked; };
 
@@ -299,6 +313,8 @@ function wireWizard(){
       tune: AUTOML.tune,
       target_stage: AUTOML.stage,
       max_models: Math.max(1, AUTOML.selection.length),
+      model_name: AUTOML.name || null,
+      positive_label: AUTOML.positive || null,
     };
     const needsKey = await authRequired();
     const proceed = await confirmAction({
@@ -315,8 +331,10 @@ function wireWizard(){
     try {
       const res = await api.post("/api/v1/automl/runs", payload, proceed.key);
       api.bust();
-      toast("AutoML started.", "ok");
+      toast(`AutoML queued for ${res.model_name}.`, "ok");
+      $("#amresult").innerHTML = `<div id="amprogress"></div>` + jobPanel({ id: res.job_id, kind: "automl", status: "queued" });
       pollAutoML(res.run_id);
+      followJob(res.job_id);
     } catch(e){
       const msg = (e.status === 401 || e.status === 403)
         ? "Rejected: the API key was missing or not accepted." : e.message;
@@ -327,6 +345,13 @@ function wireWizard(){
       start.disabled = false; start.textContent = "Start AutoML";
     }
   };
+}
+
+/* What the platform will call a model nobody named -- the same rule the API
+   applies, shown so the default is never a surprise. */
+function suggestedName(target){
+  const slug = String(target || "model").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "model";
+  return `${/^[a-z]/.test(slug) ? slug : "m_" + slug}_classifier`.slice(0, 64);
 }
 
 /* Progress from the run's own state: which stage it reached and what each
@@ -345,7 +370,7 @@ async function pollAutoML(runId, attempt){
   const finished = cands.filter(c => c.status !== "queued" && c.status !== "training").length;
   const pct = done ? 100 : (cands.length ? Math.round((finished / cands.length) * 100) : 5);
 
-  const box = $("#amresult");
+  const box = $("#amprogress") || $("#amresult");
   if(box) box.innerHTML = `
     <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
       <b class="mono">${esc(runId.replace("automl-",""))}</b> ${runStatusBadge(run.status)}

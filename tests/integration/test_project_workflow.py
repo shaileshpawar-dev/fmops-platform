@@ -148,15 +148,28 @@ def test_workflow_drives_only_endpoints_that_exist(api_client):
 def test_workflow_states_what_the_platform_cannot_do(api_client):
     """The steps most likely to be dressed up are the ones asserted here.
 
-    Each of these corresponds to a real constraint: online scoring is bound to
-    one fixed request schema, registration happens inside the run rather than
-    through a button, and drift measured without labels is not concept drift.
+    Each of these corresponds to a real constraint: registration happens inside
+    the run rather than through a button, drift measured without labels is not
+    concept drift, and only binary classification can be trained.
     """
     body = _flat(_console_source(api_client))
-    assert "one fixed request shape" in body
-    assert "registration happens inside the run" in body
+    assert "registration happens inside the run" in body.lower()
     assert "It is not concept drift" in body
     assert "binary classification" in body
+
+
+def test_workflow_predicts_against_the_models_own_contract(api_client):
+    """The predict step scores the model the workflow trained, on its own features.
+
+    It used to be bound to the reference model's fixed request schema. It now
+    reads the recorded signature of the named model and posts to that model's
+    predict route -- and never to the reference-only /api/v1/predict.
+    """
+    body = _flat(_console_source(api_client))
+    assert "built from the input contract recorded" in body
+    assert "/api/v1/models/${enc}/signature" in body
+    assert "/api/v1/models/${encodeURIComponent(ctx.name)}/predict" in body
+    assert 'api.post("/api/v1/predict"' not in body
 
 
 def test_workflow_distinguishes_pending_manual_from_rejected(api_client):
@@ -195,14 +208,20 @@ def test_deployability_follows_the_stage_rule_the_api_enforces(api_client):
 def test_workflow_never_offers_a_gate_override(api_client):
     """No path through the workflow may deploy a version the gate rejected.
 
-    The deployment API does take ``force``, and the workflow must not reach for
-    it: the gate is the backend's decision to make.
+    The deployment request has no ``force`` field at all -- a version reaches a
+    deployable stage only through the gate -- and the workflow's own scripts
+    never send one. (Retraining does take ``force``, meaning "run even though
+    the trigger would not fire"; that is not a gate override and is not used
+    here.)
     """
+    from app.schemas.deployment import DeploymentRequest
+
+    assert "force" not in DeploymentRequest.model_fields
+
     body = _console_source(api_client)
-    workflow = (
-        body[body.index("PAGES.newproject") - 60000 :] if "PAGES.newproject" in body else ""
-    )
     assert "PAGES.newproject" in body
     assert "force=true" not in body
-    assert "force: true" not in workflow
-    assert '"force"' not in workflow
+    for path in ("project.js", "project-steps.js", "project-wire.js"):
+        source = api_client.get(f"/static/js/pages/{path}")
+        assert source.status_code == 200
+        assert "force" not in source.text, f"{path} sends a force flag"
