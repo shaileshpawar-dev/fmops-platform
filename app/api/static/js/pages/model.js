@@ -43,7 +43,10 @@ async function modelsIndex(){
   if(fleet === null) return errorState(r.dash.error, "models");
   if(!fleet.length) return card("Model registry", `<div class="state"><div class="big">No models yet</div>
     A model appears here once a training or AutoML run registers a version.
-    <div style="margin-top:12px"><a class="btn pri" href="#/newproject">New ML Project</a></div></div>`);
+    <div style="margin-top:12px">
+      <a class="btn pri" href="#/newproject">New ML Project</a>
+      <button class="btn" data-act="upload-model">Upload Pretrained Model</button>
+    </div></div>`);
 
   return card("Registered models", table([
     { label:"Model", sort:m => m.name, render:m =>
@@ -66,7 +69,7 @@ async function modelsIndex(){
           `<span class="dim">${esc(ago(m.last_drift_at))}</span>`}` },
     { label:"Endpoint", render:m => `<span class="mono dim">${esc(m.endpoint || (meta[m.name]||{}).endpoint || "-")}</span>` },
   ], fleet, { id:"models-fleet", sortKey:"Model", filter:"Filter models",
-    empty:"No models." }), { flush:true, sub:`${fleet.length} model(s)` })
+    empty:"No models." }), { flush:true, sub:`${fleet.length} model(s)`, right: `<button class="btn sm" data-act="upload-model">Upload Pretrained</button>` })
   + `<p class="dim" style="margin:12px 2px 0;font-size:12.5px;max-width:80ch">Each model has its own
      serving endpoint and input contract, recorded when its versions were trained. A version is
      compared only with other versions of the same model, and a model name keeps one target for
@@ -607,6 +610,76 @@ function followInto(job, onDone){
 }
 
 function wireModelActions(){
+  document.querySelectorAll('[data-act="upload-model"]').forEach(b => b.onclick = () => {
+    const m = document.createElement("div");
+    m.className = "modal";
+    m.innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="uplT">
+      <div class="body" style="padding:16px">
+        <h3 id="uplT">Upload Pretrained Model</h3>
+        <p style="color:var(--ink-2);margin:8px 0 12px;font-size:12.5px">Upload a .pkl or .joblib artifact. You can specify a new model name or an existing one.</p>
+        
+        <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Model Name</label>
+        <input type="text" id="up_name" placeholder="e.g. churn_model" autocomplete="off" style="margin-bottom:12px;width:100%">
+        
+        <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Artifact File</label>
+        <input type="file" id="up_file" accept=".pkl,.joblib" style="margin-bottom:12px">
+        
+        <div id="up_err" style="color:var(--bad);font-size:12.5px;margin-bottom:12px;display:none"></div>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+          <button class="btn" id="up_no">Cancel</button>
+          <button class="btn pri" id="up_yes">Upload</button>
+        </div>
+      </div></div>`;
+    document.body.appendChild(m);
+    
+    const close = () => m.remove();
+    $("#up_no", m).onclick = close;
+    $("#up_yes", m).onclick = async () => {
+      const name = $("#up_name", m).value.trim();
+      const fileInput = $("#up_file", m);
+      const err = $("#up_err", m);
+      
+      if(!name){ err.textContent = "Model name is required."; err.style.display="block"; return; }
+      if(!fileInput.files.length){ err.textContent = "A file must be selected."; err.style.display="block"; return; }
+      
+      const file = fileInput.files[0];
+      const ext = file.name.split(".").pop().toLowerCase();
+      if(ext !== "pkl" && ext !== "joblib"){ err.textContent = "Only .pkl and .joblib are supported."; err.style.display="block"; return; }
+      
+      const btn = $("#up_yes", m);
+      btn.disabled = true;
+      btn.textContent = "Uploading...";
+      err.style.display = "none";
+      
+      try {
+        const res = await fetch(`/api/v1/models/${encodeURIComponent(name)}/upload`, {
+          method: "POST",
+          body: file,
+          headers: { 
+            "Accept": "application/json",
+            "Content-Type": "application/octet-stream",
+            "X-File-Name": file.name 
+          }
+        });
+        const text = await res.text();
+        let body = null; try { body = text ? JSON.parse(text) : null; } catch(e){ body = text; }
+        if(!res.ok){
+          throw new Error((body && body.error && body.error.message) || (typeof body === "string" ? body : `HTTP ${res.status}`));
+        }
+        toast("Model uploaded successfully.", "ok");
+        api.bust();
+        close();
+        render();
+      } catch(e) {
+        err.textContent = `Upload failed: ${e.message}`;
+        err.style.display = "block";
+        btn.disabled = false;
+        btn.textContent = "Upload";
+      }
+    };
+  });
+
   document.querySelectorAll("[data-deploy]").forEach(b => b.onclick = () => runAction({
     title: `${b.dataset.stage === "Staging" ? "Shadow" : "Deploy"} ${b.dataset.name} v${b.dataset.deploy}`,
     body: b.dataset.stage === "Staging"

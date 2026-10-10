@@ -333,10 +333,6 @@ class TrackingConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    auth_backend: Literal["none", "api_key"] = "none"
-    api_keys: list[str] = Field(default_factory=list)
-    api_key_header: str = "X-API-Key"
-    require_auth_for_writes: bool = True
     audit_log_enabled: bool = True
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
     max_request_bytes: int = 2_000_000
@@ -518,10 +514,6 @@ class Settings(BaseSettings):
         ):
             if data.get(key) is not None:
                 data[key] = "***redacted***"
-        if data.get("security", {}).get("api_keys"):
-            data["security"]["api_keys"] = ["***redacted***"] * len(
-                data["security"]["api_keys"]
-            )
         if data.get("alerts", {}).get("webhook_url"):
             data["alerts"]["webhook_url"] = "***redacted***"
         return data

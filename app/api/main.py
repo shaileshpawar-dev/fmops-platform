@@ -77,7 +77,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         extra={
             "environment": settings.environment,
             "version": settings.version,
-            "auth_backend": settings.security.auth_backend,
             "deployment_provider": settings.deployment.provider,
             "registry_backend": settings.tracking.registry_backend,
             "aws_enabled": settings.aws.enabled,
@@ -261,7 +260,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_origins=settings.security.cors_allow_origins,
             allow_credentials=False,
             allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["*", settings.security.api_key_header],
+            allow_headers=["*"],
         )
 
     auth_state = AuthMiddlewareState(settings)

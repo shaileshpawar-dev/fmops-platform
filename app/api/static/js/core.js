@@ -253,9 +253,8 @@ const api = (() => {
         throw e;
       }
     },
-    post(path, body, apiKey){
+    post(path, body){
       const headers = { "Content-Type": "application/json", "Accept": "application/json" };
-      if(apiKey) headers["X-API-Key"] = apiKey;
       return raw(path, { method: "POST", headers, body: body ? JSON.stringify(body) : "{}" });
     },
     text(path){ return fetch(path).then(r => r.text()); },
@@ -299,29 +298,6 @@ function toast(msg, kind){
 }
 
 /* --------------------------------------------------- guarded actions ---- */
-/* Write endpoints require an API key. The key is asked for per action, held
-   in a local variable for the duration of that one request, and never
-   written to localStorage, sessionStorage, a cookie or the URL. */
-let AUTH_REQUIRED = null;   // null = not yet known
-async function authRequired(){
-  if(AUTH_REQUIRED !== null) return AUTH_REQUIRED;
-  try {
-    const cfg = await api.get("/api/v1/config", 60000);
-    AUTH_REQUIRED = ((cfg.security || {}).auth_backend || "none") !== "none";
-  } catch(e){
-    // If the backend cannot be asked, ask for a key rather than send a write
-    // that is about to be rejected.
-    AUTH_REQUIRED = true;
-  }
-  return AUTH_REQUIRED;
-}
-
-/* Keyboard containment for anything that overlays the page.
- *
- * Returns a release function. Without this, Tab from an open dialog walks into
- * the page behind it -- the user is "inside" a modal that the keyboard has
- * already left, which is worse than having no dialog at all.
- */
 function trapFocus(container, onEscape){
   const previous = document.activeElement;
   const sel = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),'
@@ -344,39 +320,24 @@ function trapFocus(container, onEscape){
 
   return function release(){
     container.removeEventListener("keydown", onKey);
-    /* Return the caret to whatever opened the dialog, so keyboard position is
-       not lost when it closes. */
     if(previous && typeof previous.focus === "function" && document.contains(previous)){
       previous.focus();
     }
   };
 }
 
-/* A key the viewer chose to keep for this tab. It lives in this variable only:
-   never localStorage, sessionStorage, a cookie or the URL, and a reload drops
-   it. It exists because asking for the key on every prediction is hostile,
-   and the only place it is safe to keep is memory the page already owns. */
-let MEMORY_KEY = "";
+let COPY_SEQ = 0;
 
 function confirmAction(opts){
   return new Promise(resolve => {
     const m = document.createElement("div");
     m.className = "modal";
     const titleId = `acT${++COPY_SEQ}`;
-    const askKey = opts.needsKey && !MEMORY_KEY;
     m.innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
       <div class="body" style="padding:16px">
         <h3 id="${titleId}">${esc(opts.title)}</h3>
         <p style="color:var(--ink-2);margin:8px 0 12px;font-size:12.5px">${esc(opts.body)}</p>
         ${opts.extra || ""}
-        ${askKey ? `<label for="ackey" style="font-size:11.5px;color:var(--ink-3)">API key (X-API-Key)</label>
-          <input type="password" id="ackey" autocomplete="off" placeholder="required for write actions">
-          <label class="chk" style="margin-top:8px"><input type="checkbox" id="ackeep">
-            Keep in this tab's memory until reload</label>
-          <p style="font-size:11px;color:var(--ink-3);margin:6px 0 0">
-            Never written to browser storage, a cookie or the URL.</p>`
-          : opts.needsKey ? `<p class="dim" style="font-size:11.5px;margin:0">Using the API key kept
-            in this tab's memory. <button class="linkbtn" id="acforget">Forget it</button></p>` : ""}
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
           <button class="btn" id="acno">Cancel</button>
           <button class="btn ${opts.danger?"danger":"pri"}" id="acyes">${esc(opts.confirm||"Confirm")}</button>
@@ -385,44 +346,29 @@ function confirmAction(opts){
     document.body.appendChild(m);
     const release = trapFocus(m, () => done(null));
     const done = v => { release(); m.remove(); resolve(v); };
-    const forget = $("#acforget", m);
-    if(forget) forget.onclick = () => { MEMORY_KEY = ""; toast("Key forgotten."); done(null); };
     $("#acno", m).onclick = () => done(null);
     $("#acyes", m).onclick = () => {
       const fields = {};
       m.querySelectorAll("[data-field]").forEach(el => { fields[el.dataset.field] = el.value; });
-      let key = "";
-      if(opts.needsKey){
-        key = askKey ? ($("#ackey", m).value || "") : MEMORY_KEY;
-        if(askKey && key && $("#ackeep", m).checked) MEMORY_KEY = key;
-      }
-      done({ key, fields });
+      done({ fields });
     };
     m.onclick = e => { if(e.target === m) done(null); };
   });
 }
 
-/* Confirm, send, report. Returns the response body (or undefined when the
-   viewer cancelled or the call failed) so callers can follow a job it queued.
-   `payload` may be a function of the dialog's `data-field` inputs. */
 async function runAction(opts){
-  if(opts.needsKey !== false) opts = { ...opts, needsKey: await authRequired() };
   const c = await confirmAction(opts);
   if(!c) return undefined;
-  if(opts.needsKey && !c.key){ toast("An API key is required for this action.", "bad"); return undefined; }
   const payload = typeof opts.payload === "function" ? opts.payload(c.fields) : opts.payload;
   try {
-    const res = await api.post(opts.path, payload, c.key);
+    const res = await api.post(opts.path, payload);
     api.bust();
     toast(opts.success || "Action completed.", "ok");
     if(opts.after) await opts.after(res);
     else render();
     return res;
   } catch(e){
-    if(e.status === 401 || e.status === 403) MEMORY_KEY = "";
-    toast((e.status === 401 || e.status === 403)
-      ? "Rejected: the API key was missing or not accepted."
-      : `Failed: ${e.message}`, "bad");
+    toast(`Failed: ${e.message}`, "bad");
     return undefined;
   }
 }

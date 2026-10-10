@@ -468,3 +468,55 @@ def evaluate_gate(name: str, version: int) -> dict[str, Any]:
 )
 def set_tags(name: str, version: int, tags: dict[str, str] = Body(...)) -> ModelVersion:
     return get_registry().set_tags(name, version, tags)
+
+
+from fastapi import HTTPException
+import uuid
+import os
+
+@router.post("/{name}/upload", response_model=ModelVersion, summary="Upload a pre-trained model")
+async def upload_model(name: str, request: Request) -> ModelVersion:
+    """Directly upload a pre-trained model artifact via raw binary body."""
+    filename = request.headers.get("X-File-Name")
+    if not filename:
+        raise HTTPException(400, "No X-File-Name header provided")
+    
+    ext = filename.split(".")[-1].lower()
+    if ext not in ("pkl", "joblib"):
+        raise HTTPException(400, f"Unsupported file extension: .{ext}. Only .pkl and .joblib are supported.")
+    
+    settings = get_settings()
+    temp_dir = settings.paths.models_dir / "uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid.uuid4()}.{ext}"
+    
+    size = 0
+    with temp_path.open("wb") as f:
+        async for chunk in request.stream():
+            f.write(chunk)
+            size += len(chunk)
+        
+    # Validate size
+    if size == 0:
+        raise HTTPException(400, "Uploaded file is empty")
+        
+    # Check if we can load it to verify it's a valid model
+    try:
+        import joblib
+        model = joblib.load(str(temp_path))
+        if not hasattr(model, "predict"):
+            raise HTTPException(400, "Uploaded artifact is not an estimator (missing predict method).")
+    except Exception as e:
+        raise HTTPException(400, f"Could not deserialize uploaded artifact: {e}")
+
+    # Register
+    actor = request_actor(request)
+    version = get_registry().register(
+        name=name,
+        artifact_uri=f"file://{temp_path.absolute().as_posix()}",
+        algorithm="uploaded",
+        description=f"Uploaded by {actor}",
+        created_by=actor
+    )
+    return version
+

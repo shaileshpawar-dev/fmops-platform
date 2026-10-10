@@ -65,88 +65,21 @@ class Principal:
 ANONYMOUS = Principal(subject="anonymous", authenticated=False)
 
 
-class AuthBackend(ABC):
-    name: str = "abstract"
-
-    @abstractmethod
-    def authenticate(self, request: Request) -> Principal: ...
-
-
-class NoAuthBackend(AuthBackend):
-    """Everything is anonymous. Development only."""
+class NoAuthBackend:
+    """Everything is anonymous. Authentication is disabled."""
 
     name = "none"
 
     def authenticate(self, request: Request) -> Principal:
         return ANONYMOUS
 
-
-class ApiKeyBackend(AuthBackend):
-    """Shared-secret API keys presented in a header."""
-
-    name = "api_key"
-
-    def __init__(self, keys: list[str], header: str = "X-API-Key") -> None:
-        self.header = header
-        self._keys = [k for k in keys if k]
-        if not self._keys:
-            logger.error(
-                "auth.no_api_keys_configured",
-                extra={
-                    "impact": "every authenticated request will be rejected",
-                    "fix": "set FMOPS_SECURITY__API_KEYS",
-                },
-            )
-
-    def authenticate(self, request: Request) -> Principal:
-        presented = request.headers.get(self.header)
-        if not presented:
-            raise AuthenticationError(
-                f"missing {self.header} header",
-                header=self.header,
-            )
-        for known in self._keys:
-            if secrets.compare_digest(presented, known):
-                # Never log the key itself, only a short non-reversible tag.
-                return Principal(
-                    subject=f"key:{_key_tag(known)}",
-                    authenticated=True,
-                    scopes=("read", "write"),
-                )
-        raise AuthenticationError("invalid API key", header=self.header)
-
-
-def _key_tag(key: str) -> str:
-    from app.core.utils import hash_text
-
-    return hash_text(key)[:8]
-
-
-def build_auth_backend(settings: Settings | None = None) -> AuthBackend:
-    settings = settings or get_settings()
-    if settings.security.auth_backend == "api_key":
-        return ApiKeyBackend(settings.security.api_keys, settings.security.api_key_header)
-    if settings.is_production:
-        logger.error(
-            "auth.disabled_in_production",
-            extra={
-                "auth_backend": "none",
-                "impact": "the API accepts unauthenticated writes",
-                "fix": "set FMOPS_SECURITY__AUTH_BACKEND=api_key and supply keys",
-            },
-        )
+def build_auth_backend(settings: Settings | None = None) -> NoAuthBackend:
     return NoAuthBackend()
 
-
 def request_actor(request: Request) -> str:
-    """Who is making this request, as the audit log should record it.
-
-    Always the authenticated principal -- never a value the caller supplies in
-    the body, which anyone could set to anyone.
-    """
+    """Who is making this request, as the audit log should record it."""
     principal = getattr(request.state, "principal", None)
     return principal.subject if principal is not None else ANONYMOUS.subject
-
 
 class AuthMiddlewareState:
     """Holds the backend and decides which requests need credentials."""
@@ -156,15 +89,7 @@ class AuthMiddlewareState:
         self.backend = build_auth_backend(self.settings)
 
     def requires_auth(self, method: str, path: str) -> bool:
-        if self.backend.name == "none":
-            return False
-        if path in PUBLIC_PATHS or path.startswith("/static"):
-            return False
-        if self.settings.security.require_auth_for_writes:
-            return method.upper() in WRITE_METHODS
-        return True
+        return False
 
     def authenticate(self, request: Request) -> Principal:
-        if not self.requires_auth(request.method, request.url.path):
-            return ANONYMOUS
-        return self.backend.authenticate(request)
+        return ANONYMOUS

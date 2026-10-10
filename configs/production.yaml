@@ -112,8 +112,6 @@ tracking:
   experiment_name: fmops-production
 
 security:
-  auth_backend: api_key            # keys arrive only via FMOPS_SECURITY__API_KEYS
-  require_auth_for_writes: true
   audit_log_enabled: true
   cors_allow_origins: []
   max_batch_rows: 500

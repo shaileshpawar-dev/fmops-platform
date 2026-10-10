@@ -725,3 +725,27 @@ def test_retraining_trigger_endpoint(api_client):
     assert "should_retrain" in body
     assert "checks" in body
     assert body["report"]
+
+def test_model_upload(api_client, settings, tmp_path):
+    import joblib
+    from sklearn.linear_model import LogisticRegression
+    
+    name = 'uploaded_model'
+    model = LogisticRegression()
+    model_path = tmp_path / 'model.joblib'
+    joblib.dump(model, model_path)
+    
+    with model_path.open('rb') as f:
+        content = f.read()
+        
+    response = api_client.post(
+        f'/api/v1/models/{name}/upload',
+        content=content,
+        headers={'X-File-Name': 'model.joblib'}
+    )
+    assert response.status_code == 200
+    version = response.json()
+    assert version['name'] == name
+    assert version['version'] == 1
+    assert version['algorithm'] == 'uploaded'
+
