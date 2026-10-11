@@ -162,3 +162,81 @@ def test_nan_heavy_column_fails_the_missing_check(valid_frame, settings):
 def test_empty_frame_does_not_crash(settings):
     report = validate_dataframe(pd.DataFrame(), "loan_default", None, settings)
     assert not report.passed
+
+
+def test_inferred_identifier_permits_repeated_identifiers(settings):
+    """An inferred identifier column must not be forced unique when repeated values exist."""
+    from app.automl.profiler import profile_frame
+    from app.data.contract import contract_for_target
+    from app.data.validation import validate_dataset
+
+    # 550 unique IDs across 600 rows: > 50% unique ratio and named sample_id
+    ids = list(range(1000, 1550)) + list(range(1000, 1050))
+    df = pd.DataFrame({
+        "sample_id": ids,  # repeated subject IDs
+        "feat_a": np.random.randn(600),
+        "feat_b": np.random.randn(600),
+        "target": np.random.choice([0, 1], size=600),
+    })
+    profile = profile_frame(df, target_override="target")
+    assert any(c.name == "sample_id" and c.likely_identifier for c in profile.columns)
+
+    scoped_settings = contract_for_target(df, "target", profile=profile)
+    # The identifier should be excluded from model features
+    assert "sample_id" not in scoped_settings.data.feature_columns
+    assert scoped_settings.data.id_column == "sample_id"
+
+    # Validation should NOT fail sample_id for uniqueness
+    report = validate_dataset(df, target="target", settings=scoped_settings)
+    unique_failures = [
+        r for r in report.results
+        if r.expectation == "column_values_unique" and r.column == "sample_id"
+    ]
+    assert len(unique_failures) == 0, "inferred identifiers must not enforce unique=True"
+
+
+def test_explicit_reference_contract_enforces_uniqueness(valid_frame, settings):
+    """Explicit contracts (e.g. loan_reference) must strictly enforce uniqueness."""
+    frame = valid_frame.copy()
+    # duplicate an explicit application_id
+    frame.loc[1, settings.data.id_column] = frame.loc[0, settings.data.id_column]
+    report = validate_dataframe(frame, settings.data.dataset_name, None, settings)
+    assert not report.passed
+    assert any(
+        r.expectation == "column_values_unique" and r.column == settings.data.id_column
+        for r in report.errors
+    )
+
+
+def test_duplicate_row_fraction_limits_enforced(settings):
+    """Verify duplicate row fraction above and below the configured limit."""
+    from app.data.validation import NativeValidationEngine, build_schema
+    from app.data.contract import contract_for_target
+    from app.automl.profiler import profile_frame
+
+    # Baseline: 600 rows, 1% limit means <= 6 duplicate rows allowed
+    base_rows = pd.DataFrame({
+        "f1": np.arange(600, dtype=float),
+        "f2": np.arange(600, dtype=float),
+        "target": np.random.choice([0, 1], size=600),
+    })
+
+    # Case A: Below limit (3 duplicates = 3/600 = 0.5% <= 1%)
+    df_below = base_rows.copy()
+    df_below.iloc[10:13] = df_below.iloc[0:3].values
+    profile_below = profile_frame(df_below, target_override="target")
+    settings_below = contract_for_target(df_below, "target", profile=profile_below)
+    engine_below = NativeValidationEngine(settings_below.validation, settings_below.data)
+    rep_below = engine_below.validate(df_below, build_schema(settings_below.data), "uploaded")
+    dup_below = [r for r in rep_below.results if r.expectation == "duplicate_row_fraction_below_limit"]
+    assert dup_below and dup_below[0].success is True
+
+    # Case B: Above limit (9 duplicates = 9/600 = 1.5% > 1%)
+    df_above = base_rows.copy()
+    df_above.iloc[10:19] = df_above.iloc[0:9].values
+    profile_above = profile_frame(df_above, target_override="target")
+    settings_above = contract_for_target(df_above, "target", profile=profile_above)
+    engine_above = NativeValidationEngine(settings_above.validation, settings_above.data)
+    rep_above = engine_above.validate(df_above, build_schema(settings_above.data), "uploaded")
+    dup_above = [r for r in rep_above.results if r.expectation == "duplicate_row_fraction_below_limit"]
+    assert dup_above and dup_above[0].success is False and dup_above[0].blocking is True

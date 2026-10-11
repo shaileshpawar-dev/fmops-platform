@@ -72,10 +72,12 @@ def _inferred_schema(cfg: DataConfig) -> dict[str, ColumnSpec]:
 
     The identifier and timestamp columns are optional: the profiler names them
     when it finds them, and the defaults it falls back to may not exist in the
-    frame at all.
+    frame at all. Inferred identifiers are excluded from features but are not
+    assumed to be strictly unique (e.g. repeated subject IDs or non-key IDs).
+    Explicit user contracts (loan_reference) retain strict unique=True.
     """
     specs = [
-        ColumnSpec(cfg.id_column, "string", required=False, unique=True),
+        ColumnSpec(cfg.id_column, "string", required=False, unique=False),
         ColumnSpec(cfg.timestamp_column, "date", required=False),
         *(ColumnSpec(name, "numeric") for name in cfg.numeric_features),
         *(ColumnSpec(name, "categorical") for name in cfg.categorical_features),

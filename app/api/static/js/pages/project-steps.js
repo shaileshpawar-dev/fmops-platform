@@ -16,7 +16,36 @@ async function stepDataset(){
     ? Math.floor(limits.max_upload_bytes / (1024*1024)) : null;
   const formats = limits && limits.accepted_formats ? limits.accepted_formats.join(", ") : "CSV";
 
-  const drop = `
+  const workflowChoice = `
+    <div style="margin-bottom:20px">
+      <div style="font-size:12.5px;font-weight:600;margin-bottom:10px;color:var(--ink-2);text-transform:uppercase;letter-spacing:0.5px">
+        Choose Workflow Pathway
+      </div>
+      <div class="grid g2" style="gap:14px">
+        <div class="card" style="border:1.5px solid var(--accent);background:var(--card);padding:14px;border-radius:6px;cursor:default">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span class="mark" style="color:var(--accent);font-weight:bold" aria-hidden="true">&bull;</span>
+            <b style="font-size:13.5px">A. Train New Model with AutoML</b>
+          </div>
+          <p class="dim" style="font-size:12px;margin:0 0 10px;line-height:1.4">
+            Upload a tabular CSV dataset. FMOps automatically profiles columns, runs validation gates, and trains candidate algorithms.
+          </p>
+          <span class="badge ok" style="font-size:11px">Active Below</span>
+        </div>
+        <div class="card" style="border:1.5px solid var(--line);background:var(--card);padding:14px;border-radius:6px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span class="mark" style="color:var(--ink-3);font-weight:bold" aria-hidden="true">&bull;</span>
+            <b style="font-size:13.5px">B. Register a Pretrained Model</b>
+          </div>
+          <p class="dim" style="font-size:12px;margin:0 0 10px;line-height:1.4">
+            Already have a trained scikit-learn model? Register an existing <code>.joblib</code> or <code>.pkl</code> artifact directly into the platform model registry.
+          </p>
+          <button class="btn" data-act="upload-model" style="font-size:12px">Upload Pretrained Model &rarr;</button>
+        </div>
+      </div>
+    </div>`;
+
+  const drop = workflowChoice + `
     <label class="drop" id="prjdrop" for="prjfile">
       <div class="icn" aria-hidden="true">&uarr;</div>
       <div class="big">Drag &amp; drop a CSV here</div>
@@ -68,11 +97,9 @@ async function stepDataset(){
       </div></div>`;
   }
 
-  return wizFrame(1, "Upload your data",
-    `Upload the CSV you want FMOps to train on. It is parsed with pandas, registered as a
-     content-addressed version, and checked against the platform validation suite &mdash; the
-     same expectations the training pipeline gates on. Uploading identical bytes twice returns
-     the existing version rather than creating a duplicate.`,
+  return wizFrame(1, "Choose pathway or upload data",
+    `Start by either training a new model via AutoML or registering an existing pretrained model artifact (.pkl, .joblib).
+     For AutoML training, upload a CSV dataset to parse with pandas, register as a content-addressed version, and check against the validation suite.`,
     drop + done);
 }
 

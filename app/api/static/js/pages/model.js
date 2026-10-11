@@ -616,7 +616,10 @@ function wireModelActions(){
     m.innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="uplT">
       <div class="body" style="padding:16px">
         <h3 id="uplT">Upload Pretrained Model</h3>
-        <p style="color:var(--ink-2);margin:8px 0 12px;font-size:12.5px">Upload a .pkl or .joblib artifact. You can specify a new model name or an existing one.</p>
+        <p style="color:var(--ink-2);margin:8px 0 6px;font-size:12.5px">Upload a <code>.pkl</code> or <code>.joblib</code> artifact. You can specify a new model name or an existing one.</p>
+        <div style="background:var(--card-hover, rgba(0,0,0,0.03));border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin-bottom:12px;font-size:11.5px;color:var(--ink-2)">
+          <b>Governance &amp; Evaluation:</b> Artifacts are registered with <code>metrics=None</code>. Client-supplied metrics are recorded as informational metadata only. Stage promotions (Staging/Production) require verified evaluation against ground truth and cannot be bypassed.
+        </div>
         
         <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Model Name</label>
         <input type="text" id="up_name" placeholder="e.g. churn_model" autocomplete="off" style="margin-bottom:12px;width:100%">
