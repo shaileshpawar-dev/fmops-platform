@@ -166,15 +166,24 @@ class MonitoringService:
         try:
             from app.api.serving import get_prediction_service
             from app.data.preprocessing import prepare_inference_frame
+            from app.training.evaluate import predict_proba as get_probs
 
             model, _ = get_prediction_service().resolve_model(version, self._name(model_name))
             sample = reference.head(2000)
             frame = prepare_inference_frame(sample, model.data_config or self.settings.data)
-            probabilities = model.pipeline.predict_proba(frame)[:, 1]
-            enriched = sample.copy()
-            enriched["_probability"] = probabilities
-            enriched["_prediction"] = (probabilities >= model.threshold).astype(int)
-            return enriched
+            try:
+                probabilities = get_probs(model.pipeline, frame)
+                enriched = sample.copy()
+                enriched["_probability"] = probabilities
+                enriched["_prediction"] = (probabilities >= model.threshold).astype(int)
+                return enriched
+            except Exception:
+                if hasattr(model.pipeline, "predict"):
+                    preds = model.pipeline.predict(frame)
+                    enriched = sample.copy()
+                    enriched["_prediction"] = preds
+                    return enriched
+                raise
         except Exception as exc:
             logger.debug("monitoring.reference_scoring_skipped", extra={"error": str(exc)})
             return reference

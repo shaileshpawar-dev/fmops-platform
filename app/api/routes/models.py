@@ -24,7 +24,7 @@ from app.core.audit import audit
 from app.core.config import get_settings
 from app.core.exceptions import FMOpsError, PredictionError
 from app.core.logging import get_logger, new_request_id
-from app.registry.context import endpoint_for, signature_of
+from app.registry.context import endpoint_for, is_reference_model, signature_of
 from app.registry.factory import get_registry
 from app.schemas.common import ApprovalDecision, ModelStage, ModelStatus
 from app.schemas.model import ModelVersion, StageTransition
@@ -200,8 +200,12 @@ def signature(name: str, version: int | None = None) -> dict[str, Any]:
         "detail": (
             None
             if sig
-            else "this version predates recorded signatures; it is the reference model and "
-            "takes the typed request documented at POST /api/v1/predict"
+            else (
+                "this version predates recorded signatures; it is the reference model and "
+                "takes the typed request documented at POST /api/v1/predict"
+                if is_reference_model(name)
+                else "this legacy model version has no recorded input signature; please retrain or register a new version with a valid signature"
+            )
         ),
     }
 
@@ -487,31 +491,105 @@ def set_tags(name: str, version: int, tags: dict[str, str] = Body(...)) -> Model
 from fastapi import HTTPException
 import uuid
 import os
+import shutil
+
+MAX_MODEL_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 @router.post("/{name}/upload", response_model=ModelVersion, summary="Upload a pre-trained model")
 async def upload_model(name: str, request: Request) -> ModelVersion:
-    """Directly upload a pre-trained model artifact via raw binary body."""
+    """Upload a pre-trained model artifact via raw binary streaming or multipart form."""
+    import secrets
+    from app.core.config import get_settings
+    from app.core.signature import SignatureError, validate_model_name
+
+    settings = get_settings()
+    if not settings.security.allow_model_upload:
+        token = settings.security.model_upload_token
+        auth_header = (
+            request.headers.get("X-Upload-Token")
+            or request.headers.get("Authorization", "")
+        ).replace("Bearer ", "").strip()
+        if not (token and auth_header and secrets.compare_digest(auth_header, token)):
+            raise HTTPException(
+                403,
+                "Pretrained model upload is disabled in production for deserialization safety. "
+                "Enable it with FMOPS_SECURITY__ALLOW_MODEL_UPLOAD=true or provide a valid X-Upload-Token header."
+            )
+
+    try:
+        validate_model_name(name)
+    except SignatureError as e:
+        raise HTTPException(400, str(e))
+
+    content_type = request.headers.get("content-type", "").lower()
+    is_multipart = content_type.startswith("multipart/form-data")
+
     filename = request.headers.get("X-File-Name")
+    sig_str = request.headers.get("X-Model-Signature")
+    metrics_str = request.headers.get("X-Model-Metrics")
+
+    uploaded_file = None
+    if is_multipart:
+        form = await request.form()
+        file_field = form.get("file")
+        if file_field is not None and hasattr(file_field, "filename"):
+            uploaded_file = file_field
+            filename = filename or file_field.filename
+        sig_str = sig_str or form.get("signature") or form.get("X-Model-Signature")
+        metrics_str = metrics_str or form.get("metrics") or form.get("X-Model-Metrics")
+
     if not filename:
-        raise HTTPException(400, "No X-File-Name header provided")
+        raise HTTPException(400, "No X-File-Name header or multipart file provided")
     
     ext = filename.split(".")[-1].lower()
     if ext not in ("pkl", "joblib"):
         raise HTTPException(400, f"Unsupported file extension: .{ext}. Only .pkl and .joblib are supported.")
     
     settings = get_settings()
-    temp_dir = settings.paths.models_dir / "uploads"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = temp_dir / f"{uuid.uuid4()}.{ext}"
+    upload_id = str(uuid.uuid4())
+    upload_dir = settings.paths.models_dir / "uploads" / upload_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = upload_dir / f"model.{ext}"
     
+    def cleanup():
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
     size = 0
-    with temp_path.open("wb") as f:
-        async for chunk in request.stream():
-            f.write(chunk)
-            size += len(chunk)
-        
+    try:
+        with temp_path.open("wb") as f:
+            if is_multipart and uploaded_file is not None:
+                while True:
+                    chunk = await uploaded_file.read(64 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_MODEL_UPLOAD_BYTES:
+                        cleanup()
+                        raise HTTPException(
+                            413,
+                            f"File exceeds the {MAX_MODEL_UPLOAD_BYTES // (1024 * 1024)} MB upload limit",
+                        )
+                    f.write(chunk)
+            else:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_MODEL_UPLOAD_BYTES:
+                        cleanup()
+                        raise HTTPException(
+                            413,
+                            f"File exceeds the {MAX_MODEL_UPLOAD_BYTES // (1024 * 1024)} MB upload limit",
+                        )
+                    f.write(chunk)
+    except HTTPException:
+        cleanup()
+        raise
+    except Exception as e:
+        cleanup()
+        raise HTTPException(500, f"Error saving upload: {e}")
+
     # Validate size
     if size == 0:
+        cleanup()
         raise HTTPException(400, "Uploaded file is empty")
         
     # Check if we can load it to verify it's a valid model
@@ -519,62 +597,91 @@ async def upload_model(name: str, request: Request) -> ModelVersion:
         import joblib
         model = joblib.load(str(temp_path))
         if not hasattr(model, "predict"):
+            cleanup()
             raise HTTPException(400, "Uploaded artifact is not an estimator (missing predict method).")
+    except HTTPException:
+        cleanup()
+        raise
     except Exception as e:
+        cleanup()
         raise HTTPException(400, f"Could not deserialize uploaded artifact: {e}")
 
     import json
     params = {}
-    metrics_str = request.headers.get("X-Model-Metrics")
-    if metrics_str:
+    if metrics_str and str(metrics_str).strip():
         try:
-            params["client_metrics"] = json.loads(metrics_str)
+            params["client_metrics"] = json.loads(str(metrics_str).strip())
         except Exception:
+            cleanup()
             raise HTTPException(400, "Invalid JSON in X-Model-Metrics header")
 
+    from app.core.signature import ModelSignature
+
     signature = None
-    sig_str = request.headers.get("X-Model-Signature")
-    if sig_str:
+    if sig_str and str(sig_str).strip():
         try:
-            signature_json = json.loads(sig_str)
+            signature_json = json.loads(str(sig_str).strip())
             if not isinstance(signature_json, dict):
                 raise ValueError("Signature must be a JSON object")
-            signature = dict(signature_json)
-            if "inputs" in signature and "features" not in signature:
-                features = []
-                for inp in signature.get("inputs", []):
-                    feat_name = inp.get("name")
-                    inp_type = str(inp.get("type", "")).lower()
-                    kind = (
-                        "categorical"
-                        if inp_type in ("string", "str", "bool", "boolean", "category")
-                        else "numeric"
-                    )
-                    dtype = "object" if kind == "categorical" else "float64"
-                    features.append({
-                        "name": feat_name,
-                        "kind": kind,
-                        "dtype": dtype,
-                    })
-                signature["features"] = features
-            if "outputs" in signature and "target" not in signature:
-                outs = signature.get("outputs")
-                if isinstance(outs, list) and outs and isinstance(outs[0], dict) and "name" in outs[0]:
-                    signature["target"] = outs[0]["name"]
+            signature_dict = dict(signature_json)
+            if "dataset_name" not in signature_dict:
+                signature_dict["dataset_name"] = name
+            if "target" not in signature_dict:
+                signature_dict["target"] = "target"
+            if "class_labels" not in signature_dict:
+                classes = getattr(model, "classes_", [0, 1])
+                signature_dict["class_labels"] = (
+                    [str(c) for c in classes] if len(classes) == 2 else ["0", "1"]
+                )
+            parsed_sig = ModelSignature.model_validate(signature_dict)
+            signature = parsed_sig.model_dump(mode="json")
+        except Exception as e:
+            cleanup()
+            raise HTTPException(400, f"Invalid model signature: {e}")
+    elif hasattr(model, "feature_names_in_") and model.feature_names_in_ is not None:
+        try:
+            classes = getattr(model, "classes_", [0, 1])
+            class_labels = [str(c) for c in classes] if len(classes) == 2 else ["0", "1"]
+            feats = [{"name": str(fn), "kind": "numeric", "dtype": "float64"} for fn in model.feature_names_in_]
+            parsed_sig = ModelSignature.model_validate({
+                "dataset_name": name,
+                "target": "target",
+                "class_labels": class_labels,
+                "features": feats,
+            })
+            signature = parsed_sig.model_dump(mode="json")
         except Exception:
-            raise HTTPException(400, "Invalid JSON in X-Model-Signature header")
+            signature = None
+
+    # Write metadata sidecar beside the artifact
+    try:
+        sidecar = upload_dir / "metadata.json"
+        metadata = {
+            "model_name": name,
+            "algorithm": "uploaded",
+            "signature": signature,
+            "feature_columns": [f["name"] for f in signature.get("features", [])] if signature else [],
+        }
+        sidecar.write_text(json.dumps(metadata, indent=2))
+    except Exception:
+        pass
 
     # Register
-    actor = request_actor(request)
-    version = get_registry().register(
-        name=name,
-        artifact_uri=temp_path.absolute().as_uri(),
-        algorithm="uploaded",
-        description=f"Uploaded by {actor}",
-        created_by=actor,
-        metrics=None,
-        params=params,
-        signature=signature
-    )
+    try:
+        actor = request_actor(request)
+        version = get_registry().register(
+            name=name,
+            artifact_uri=temp_path.absolute().as_uri(),
+            algorithm="uploaded",
+            description=f"Uploaded by {actor}",
+            created_by=actor,
+            metrics=None,
+            params=params,
+            signature=signature,
+        )
+    except Exception as e:
+        cleanup()
+        raise HTTPException(500, f"Failed to register uploaded model: {e}")
+
     return version
 

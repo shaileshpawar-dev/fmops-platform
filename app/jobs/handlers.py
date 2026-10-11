@@ -160,16 +160,32 @@ def run_deployment(ctx: JobContext) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 @handler(DRIFT_SCAN)
 def run_drift_scan(ctx: JobContext) -> dict[str, Any]:
+    from app.core.exceptions import InsufficientDataError
     from app.monitoring.service import get_monitoring_service
 
-    report = get_monitoring_service().run_drift_scan(model_name=ctx.payload["model_name"])
-    ctx.link(report.id)
-    return {
-        "report_id": report.id,
-        "drift_detected": report.drift_detected,
-        "dataset_drift_score": report.dataset_drift_score,
-        "drifted_features": report.drifted_features,
-    }
+    model_name = ctx.payload.get("model_name")
+    try:
+        report = get_monitoring_service().run_drift_scan(model_name=model_name)
+        ctx.link(report.id)
+        return {
+            "status": "completed",
+            "report_id": report.id,
+            "drift_detected": report.drift_detected,
+            "dataset_drift_score": report.dataset_drift_score,
+            "drifted_features": report.drifted_features,
+        }
+    except InsufficientDataError as exc:
+        logger.info(
+            "drift.scan_skipped_insufficient_data",
+            extra={"model": model_name, "reason": str(exc)},
+        )
+        return {
+            "status": "skipped",
+            "reason": "insufficient_data",
+            "detail": str(exc),
+            "required_samples": exc.details.get("required"),
+            "available_samples": exc.details.get("available", 0),
+        }
 
 
 # --------------------------------------------------------------------------- #

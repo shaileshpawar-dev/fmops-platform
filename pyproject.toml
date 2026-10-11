@@ -22,6 +22,7 @@ classifiers = [
 # Core runtime. Everything the platform needs to run locally, end to end.
 dependencies = [
     "fastapi>=0.115",
+    "python-multipart>=0.0.18",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",

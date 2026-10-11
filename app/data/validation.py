@@ -815,9 +815,10 @@ def validate_or_raise(
                 "n_failed": report.n_failed,
             },
         )
+        failures = "; ".join(r.message for r in report.errors) if report.errors else "unknown error"
         raise DataValidationError(
             f"data validation failed for {report.dataset_name}: "
-            f"{len(report.errors)} blocking expectation(s) failed",
+            f"{len(report.errors)} blocking expectation(s) failed ({failures})",
             dataset=report.dataset_name,
             dataset_version=report.dataset_version,
             failed=[r.message for r in report.errors],

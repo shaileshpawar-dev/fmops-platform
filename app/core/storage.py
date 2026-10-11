@@ -16,6 +16,7 @@ never cares which backend produced it:
 
 from __future__ import annotations
 
+import re
 import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -299,6 +300,11 @@ def resolve_uri_to_local(uri: str, destination: Path | str | None = None) -> Pat
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         if parsed.scheme == "file":
+            # Handle Windows drive letters parsed as netloc (e.g. file://C:/path)
+            if parsed.netloc and re.match(r"^[a-zA-Z]:$", parsed.netloc):
+                return Path(url2pathname(f"{parsed.netloc}{parsed.path}"))
+            if parsed.netloc and parsed.netloc.lower() == "localhost":
+                return Path(url2pathname(parsed.path))
             # url2pathname handles both the percent-decoding (paths with spaces
             # or parentheses round-trip through file:// encoded) and the
             # platform-specific shape (/C:/x -> C:\x on Windows).

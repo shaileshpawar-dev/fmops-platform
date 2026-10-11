@@ -462,5 +462,10 @@ def execute_automl_run(run_id: str, checkpoint: Any = None) -> str:
 
 
 def _message(exc: Exception) -> str:
-    """The human sentence of an error, without a platform error's detail dump."""
-    return str(getattr(exc, "message", None) or exc)
+    """The human sentence of an error, including actionable details when present."""
+    msg = str(getattr(exc, "message", None) or exc)
+    if hasattr(exc, "details") and isinstance(exc.details, dict):
+        failed = exc.details.get("failed")
+        if failed and isinstance(failed, list) and not any(str(f) in msg for f in failed):
+            msg = f"{msg} ({'; '.join(str(f) for f in failed)})"
+    return msg

@@ -57,6 +57,25 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=error_body(exc.code, exc.message, exc.details),
         )
 
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        code = "http_error"
+        if exc.status_code == 400:
+            code = "bad_request"
+        elif exc.status_code == 404:
+            code = "not_found"
+        elif exc.status_code == 409:
+            code = "conflict"
+        elif exc.status_code == 413:
+            code = "payload_too_large"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_body(code, str(exc.detail)),
+            headers=getattr(exc, "headers", None),
+        )
+
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         record_error("request_validation_failed", "api")

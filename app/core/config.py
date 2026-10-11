@@ -337,6 +337,8 @@ class SecurityConfig(BaseModel):
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
     max_request_bytes: int = 2_000_000
     max_batch_rows: int = 1000
+    allow_model_upload: bool = True
+    model_upload_token: str | None = None
 
 
 class ServerConfig(BaseModel):

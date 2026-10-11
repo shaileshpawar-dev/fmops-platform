@@ -63,8 +63,9 @@ class ApprovalResult(BaseModel):
         ]
         for check in self.checks:
             mark = "PASS" if check.passed else "FAIL"
+            obs = check.observed if check.observed is not None else "unavailable"
             lines.append(
-                f"  [{mark}] {check.name}: observed={check.observed} "
+                f"  [{mark}] {check.name}: observed={obs} "
                 f"threshold={check.threshold} {check.message}".rstrip()
             )
         if self.reason:

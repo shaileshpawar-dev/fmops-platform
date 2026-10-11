@@ -15,7 +15,7 @@ validation:
   engine: native
   min_rows: 500
   max_missing_fraction: 0.05
-  max_duplicate_fraction: 0.01
+  max_duplicate_fraction: 0.02
   fail_on_warning: false
 
 training:

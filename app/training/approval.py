@@ -34,11 +34,20 @@ logger = get_logger(__name__)
 
 def _check(
     name: str,
-    observed: float,
+    observed: float | None,
     threshold: float,
     comparison: str = ">=",
     blocking: bool = True,
 ) -> GateCheck:
+    if observed is None:
+        return GateCheck(
+            name=name,
+            passed=False,
+            observed=None,
+            threshold=round(float(threshold), 6),
+            blocking=blocking,
+            message=f"metric '{name}' is unavailable; verified evaluation evidence is required",
+        )
     passed = observed >= threshold if comparison == ">=" else observed <= threshold
     return GateCheck(
         name=name,
@@ -51,7 +60,7 @@ def _check(
 
 
 def evaluate_approval(
-    metrics: Metrics | dict[str, float],
+    metrics: Metrics | dict[str, float] | None,
     model_name: str,
     model_version: int | None = None,
     validation_passed: bool = True,
@@ -63,7 +72,11 @@ def evaluate_approval(
     settings = settings or get_settings()
     config = config or settings.approval
 
-    values = metrics.as_dict() if isinstance(metrics, Metrics) else dict(metrics)
+    values = (
+        metrics.as_dict()
+        if isinstance(metrics, Metrics)
+        else (dict(metrics) if metrics is not None else {})
+    )
 
     if not config.enabled:
         logger.warning(
@@ -79,18 +92,18 @@ def evaluate_approval(
         )
 
     checks: list[GateCheck] = [
-        _check("f1", values.get("f1", 0.0), config.min_f1),
-        _check("roc_auc", values.get("roc_auc", 0.0), config.min_roc_auc),
+        _check("f1", values.get("f1"), config.min_f1),
+        _check("roc_auc", values.get("roc_auc"), config.min_roc_auc),
     ]
     if config.min_precision > 0:
-        checks.append(_check("precision", values.get("precision", 0.0), config.min_precision))
+        checks.append(_check("precision", values.get("precision"), config.min_precision))
     if config.min_recall > 0:
-        checks.append(_check("recall", values.get("recall", 0.0), config.min_recall))
+        checks.append(_check("recall", values.get("recall"), config.min_recall))
 
     checks.append(
         _check(
             "inference_latency_p95_ms",
-            values.get("inference_latency_p95_ms", 0.0),
+            values.get("inference_latency_p95_ms"),
             config.max_inference_latency_ms,
             comparison="<=",
         )
@@ -174,12 +187,28 @@ def compare_to_production(
     config = config or settings.approval
     metric = config.comparison_metric
 
-    candidate_values = (
-        candidate_metrics.as_dict()
-        if isinstance(candidate_metrics, Metrics)
-        else dict(candidate_metrics)
-    )
-    candidate_score = float(candidate_values.get(metric, 0.0))
+    if candidate_metrics is None:
+        candidate_values = {}
+    elif isinstance(candidate_metrics, Metrics):
+        candidate_values = candidate_metrics.as_dict()
+    else:
+        candidate_values = dict(candidate_metrics)
+
+    candidate_score_val = candidate_values.get(metric)
+    if candidate_score_val is None:
+        return ModelComparison(
+            metric=metric,
+            baseline_version=baseline_version,
+            candidate_version=candidate_version,
+            baseline_score=0.0,
+            candidate_score=0.0,
+            improvement=0.0,
+            min_improvement=config.min_improvement,
+            candidate_is_better=False,
+            decision="reject",
+            reason=f"candidate has no verified evaluation metric for {metric!r}; evaluation evidence is required",
+        )
+    candidate_score = float(candidate_score_val)
 
     if baseline_metrics is None:
         comparison = ModelComparison(

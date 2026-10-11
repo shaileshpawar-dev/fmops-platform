@@ -298,6 +298,8 @@ function toast(msg, kind){
 }
 
 /* --------------------------------------------------- guarded actions ---- */
+async function authRequired(){ return false; }
+
 function trapFocus(container, onEscape){
   const previous = document.activeElement;
   const sel = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),'
@@ -326,13 +328,13 @@ function trapFocus(container, onEscape){
   };
 }
 
-let COPY_SEQ = 0;
+let CONFIRM_SEQ = 0;
 
 function confirmAction(opts){
   return new Promise(resolve => {
     const m = document.createElement("div");
     m.className = "modal";
-    const titleId = `acT${++COPY_SEQ}`;
+    const titleId = `acT${++CONFIRM_SEQ}`;
     m.innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
       <div class="body" style="padding:16px">
         <h3 id="${titleId}">${esc(opts.title)}</h3>

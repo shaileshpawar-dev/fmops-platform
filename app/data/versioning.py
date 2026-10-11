@@ -288,12 +288,16 @@ class DatasetRegistry:
         record = self.get(version)
         path = Path(record.path)
         if not path.is_file():
-            raise DatasetNotFoundError(
-                f"dataset file for {version} is missing at {path}; "
-                "run 'dvc pull' or regenerate with 'make data'",
-                version=version,
-                path=str(path),
-            )
+            alt = self.settings.paths.processed_dir / path.name
+            if alt.is_file():
+                path = alt
+            else:
+                raise DatasetNotFoundError(
+                    f"dataset file for {version} is missing at {path}; "
+                    "run 'dvc pull' or regenerate with 'make data'",
+                    version=version,
+                    path=str(path),
+                )
         actual = hash_file(path)
         if actual != record.content_hash:
             raise DatasetNotFoundError(

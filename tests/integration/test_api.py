@@ -749,3 +749,133 @@ def test_model_upload(api_client, settings, tmp_path):
     assert version['version'] == 1
     assert version['algorithm'] == 'uploaded'
 
+
+
+def test_model_upload_corrupted_cleanup(api_client, settings, tmp_path):
+    uploads_dir = settings.paths.models_dir / "uploads"
+    before_dirs = set(uploads_dir.glob("*")) if uploads_dir.exists() else set()
+
+    response = api_client.post(
+        "/api/v1/models/corrupted_model/upload",
+        content=b"not a valid joblib content",
+        headers={"X-File-Name": "corrupted.joblib"},
+    )
+    assert response.status_code == 400
+    after_dirs = set(uploads_dir.glob("*")) if uploads_dir.exists() else set()
+    assert after_dirs == before_dirs
+
+
+def test_model_upload_with_signature_and_metrics(api_client, settings, tmp_path):
+    import json
+    import joblib
+    from sklearn.linear_model import LogisticRegression
+
+    name = "signature_model"
+    model = LogisticRegression()
+    model_path = tmp_path / "model.joblib"
+    joblib.dump(model, model_path)
+
+    sig = {
+        "inputs": [{"name": "f1", "type": "double"}, {"name": "f2", "type": "double"}],
+        "outputs": [{"name": "target", "type": "integer"}],
+    }
+    client_metrics = {"f1": 0.88, "accuracy": 0.91}
+
+    with model_path.open("rb") as f:
+        content = f.read()
+
+    response = api_client.post(
+        f"/api/v1/models/{name}/upload",
+        content=content,
+        headers={
+            "X-File-Name": "model.joblib",
+            "X-Model-Signature": json.dumps(sig),
+            "X-Model-Metrics": json.dumps(client_metrics),
+        },
+    )
+    assert response.status_code == 200
+    version = response.json()
+    assert version["name"] == name
+    assert version["version"] == 1
+    assert version["signature"] is not None
+    assert len(version["signature"]["features"]) == 2
+    assert version["params"]["client_metrics"] == client_metrics
+    assert version["metrics"] == {}
+
+    # Approval check fails because genuine evaluation metrics were not measured by platform
+    appr_res = api_client.post(
+        f"/api/v1/models/{name}/versions/1/approve",
+        json={"target_stage": "Staging", "comment": "test promotion"},
+    )
+    assert appr_res.status_code == 409
+    assert "automated gate checks fail" in appr_res.json()["error"]["message"]
+
+
+def test_model_upload_multipart_and_gate_preview(api_client, settings, tmp_path):
+    import json
+    import joblib
+    from sklearn.linear_model import LogisticRegression
+
+    name = "multipart_model"
+    model = LogisticRegression()
+    model_path = tmp_path / "model.joblib"
+    joblib.dump(model, model_path)
+
+    sig = {
+        "inputs": [{"name": "col_a", "type": "double"}, {"name": "col_b", "type": "double"}],
+        "outputs": [{"name": "target", "type": "integer"}],
+    }
+
+    with model_path.open("rb") as f:
+        response = api_client.post(
+            f"/api/v1/models/{name}/upload",
+            files={"file": ("model.joblib", f, "application/octet-stream")},
+            data={"signature": json.dumps(sig)},
+        )
+    assert response.status_code == 200
+    version = response.json()
+    assert version["name"] == name
+    assert version["stage"] == "Development"
+    assert version["signature"] is not None
+    assert version["metrics"] == {}
+
+    # Preview gate: missing metrics should report observed=None / unavailable
+    preview_res = api_client.post(f"/api/v1/models/{name}/versions/1/evaluate-gate")
+    assert preview_res.status_code == 200
+    preview = preview_res.json()
+    approval = preview["approval"]
+    assert approval["decision"] == "rejected"
+    # Verify each missing metric check has observed=None rather than 0.0
+    for c in approval["checks"]:
+        if c["name"] in ("f1", "roc_auc", "inference_latency_p95_ms"):
+            assert c["passed"] is False
+            assert c["observed"] is None
+            assert "unavailable" in c["message"]
+
+    # Candidate comparison rejects because evaluation evidence is absent
+    assert preview["comparison"]["candidate_is_better"] is False
+    assert preview["comparison"]["decision"] == "reject"
+
+
+def test_model_upload_non_estimator_rejected(api_client, settings, tmp_path):
+    import joblib
+
+    name = "not_estimator"
+    obj_path = tmp_path / "dict_obj.joblib"
+    joblib.dump({"just": "a dictionary"}, obj_path)
+
+    uploads_dir = settings.paths.models_dir / "uploads"
+    before_dirs = set(uploads_dir.glob("*")) if uploads_dir.exists() else set()
+
+    with obj_path.open("rb") as f:
+        res = api_client.post(
+            f"/api/v1/models/{name}/upload",
+            content=f.read(),
+            headers={"X-File-Name": "model.joblib"},
+        )
+    assert res.status_code == 400
+    assert "missing predict method" in res.json()["error"]["message"]
+
+    after_dirs = set(uploads_dir.glob("*")) if uploads_dir.exists() else set()
+    assert after_dirs == before_dirs
+

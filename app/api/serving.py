@@ -35,7 +35,7 @@ from app.deployment.model_cache import LoadedModel
 from app.monitoring.inference_log import InferenceLog, get_inference_log
 from app.monitoring.metrics import record_error, record_prediction
 from app.registry.base import ModelRegistry
-from app.registry.context import default_model_name, endpoint_for
+from app.registry.context import default_model_name, endpoint_for, is_reference_model
 from app.registry.factory import get_registry
 from app.schemas.common import ModelStage
 from app.schemas.prediction import (
@@ -396,14 +396,20 @@ def check_against_contract(
             raise InvalidPredictionInputError(
                 str(exc), model=model.model_name, version=model.version
             ) from exc
-    # A pre-signature version is always the reference model, whose contract is
-    # the typed loan schema.
-    try:
-        return LoanApplicationFeatures.model_validate(record).model_dump(), []
-    except ValueError as exc:
-        raise InvalidPredictionInputError(
-            str(exc), model=model.model_name, version=model.version
-        ) from exc
+    # A pre-signature version is only valid if it is the reference model, whose
+    # contract is the typed loan schema.
+    if is_reference_model(model.model_name):
+        try:
+            return LoanApplicationFeatures.model_validate(record).model_dump(), []
+        except ValueError as exc:
+            raise InvalidPredictionInputError(
+                str(exc), model=model.model_name, version=model.version
+            ) from exc
+    raise InvalidPredictionInputError(
+        f"model {model.model_name} v{model.version} has no recorded input signature and cannot accept dynamic prediction requests; please retrain or register a new version with a valid signature",
+        model=model.model_name,
+        version=model.version,
+    )
 
 
 def check_batch_against_contract(

@@ -81,8 +81,8 @@ def signature_of(version: ModelVersion) -> ModelSignature | None:
     try:
         return ModelSignature.model_validate(version.signature)
     except (ValidationError, ValueError, TypeError) as exc:
-        logger.warning(
-            "registry.signature_invalid",
+        logger.info(
+            "registry.signature_legacy_or_invalid",
             extra={"model": version.name, "version": version.version, "error": str(exc)},
         )
         return None

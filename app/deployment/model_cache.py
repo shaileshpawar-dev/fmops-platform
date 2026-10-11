@@ -154,13 +154,19 @@ class ModelCache:
                 signature = ModelSignature.model_validate(raw_signature)
             except Exception:
                 signature = None
-        from app.registry.context import data_config_for
+        from app.registry.context import UnservableModelError, data_config_for
 
-        data_config = (
-            signature.to_data_config(self.settings.data)
-            if signature is not None
-            else data_config_for(model_version, self.settings)
-        )
+        if signature is not None:
+            data_config = signature.to_data_config(self.settings.data)
+        else:
+            try:
+                data_config = data_config_for(model_version, self.settings)
+            except UnservableModelError:
+                logger.info(
+                    "model_cache.signature_unservable_legacy",
+                    extra={"model": model_name, "version": version},
+                )
+                data_config = None
 
         loaded = LoadedModel(
             model_name=model_name,
@@ -239,13 +245,21 @@ class ModelCache:
 
         started = time.perf_counter()
         try:
+            if loaded.signature is None and loaded.data_config is None:
+                # Legacy unservable model without signature; cannot warm with sample
+                return 0.0
             sample = (
                 loaded.signature.example()
                 if loaded.signature is not None
                 else _REFERENCE_SAMPLE
             )
             frame = prepare_inference_frame([sample], loaded.data_config or self.settings.data)
-            loaded.pipeline.predict_proba(frame)
+            if hasattr(loaded.pipeline, "predict_proba"):
+                loaded.pipeline.predict_proba(frame)
+            elif hasattr(loaded.pipeline, "decision_function"):
+                loaded.pipeline.decision_function(frame)
+            elif hasattr(loaded.pipeline, "predict"):
+                loaded.pipeline.predict(frame)
         except Exception as exc:
             # A failed warm-up is not fatal to the process, but for a version
             # with a recorded signature it means the model cannot score its own
