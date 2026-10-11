@@ -44,9 +44,9 @@ ENV PYTHONUNBUFFERED=1 \
     FMOPS_GIT_COMMIT=${GIT_COMMIT} \
     FMOPS_SERVER__WORKERS=1
 
-# curl is used by the container HEALTHCHECK below.
+# curl is used by the container HEALTHCHECK below; gosu drops privileges cleanly.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
+ && apt-get install -y --no-install-recommends curl gosu \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 fmops \
  && useradd --uid 10001 --gid fmops --create-home --shell /usr/sbin/nologin fmops
@@ -59,19 +59,22 @@ COPY --chown=fmops:fmops pipelines/ ./pipelines/
 COPY --chown=fmops:fmops scripts/ ./scripts/
 COPY --chown=fmops:fmops configs/ ./configs/
 COPY --chown=fmops:fmops pyproject.toml README.md ./
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
 
 # State directories the process genuinely writes to. Everything else stays
 # owned by root and unwritable by the runtime user.
 RUN mkdir -p /app/artifacts /app/data \
  && chown -R fmops:fmops /app/artifacts /app/data
 
-USER fmops
 EXPOSE 8000
 
 # Readiness: the database answers and the job worker is alive. A platform with
 # no models yet is still ready -- it must accept uploads and training.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS http://localhost:8000/health/ready || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # The worker count comes from FMOPS_SERVER__WORKERS like every other setting;
 # hard-coding it here used to override the configured value silently.
