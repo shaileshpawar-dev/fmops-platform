@@ -136,8 +136,6 @@ pass (drift → retrain, with no retraining loop).
 ### Not implemented (future work)
 
 - Regression, multiclass, time-series, image or text models.
-- Uploading externally trained model files (by design, until there is a safe
-  format such as ONNX with validation).
 - Formats other than CSV (Parquet, databases, streams).
 - A distributed job system (separate workers, a shared queue on Postgres/SQS).
 - Shared, durable production storage (RDS/EFS/S3-backed state) and more than
@@ -353,15 +351,13 @@ see [docs/deployment.md](docs/deployment.md).
 
 | Limitation | Why | What production would need |
 |---|---|---|
-| **State lives in the container** | SQLite, datasets and artifacts are on the task's filesystem; each new task revision starts empty | RDS/EFS/S3-backed state |
-| **One task, no autoscaling** | SQLite and in-process routing are not shared across replicas | shared database, then scale out behind the ALB |
+| **State is ephemeral** | SQLite, datasets and artifacts are written to the container's temporary filesystem; they are lost on every Railway redeployment | RDS/EFS/S3-backed state |
+| **One task, no autoscaling** | SQLite and in-process routing are not shared across replicas | shared database, then scale out |
 | **Jobs run in the API process** | simplest correct design for one task | separate workers on a shared queue |
-| **HTTP only** | TLS needs a certificate, which needs a domain | ACM certificate + HTTPS listener |
-| **API key in the task definition's environment** | set at deploy time; not in Git, not in the image | Secrets Manager / SSM parameter referenced by the task |
-| **Terraform state has drifted from the running service** | app revisions are deployed by image-only task-definition updates | import or re-plan before the next `terraform apply` |
+| **No authentication** | API keys were removed to ease access for the presentation | identity provider, per-route authorisation, quotas |
 | **Binary classification on CSV only** | the gate, drift on predictions and live quality are defined over two classes | new estimators, metrics and preprocessing |
-| **No RBAC or rate limiting** | one API key gates every write | identity provider, per-route authorisation, quotas |
-| **`/docs` and `/metrics` are public** | inspectable portfolio deployment; secrets redacted | private listener or auth |
+| **Model Deserialization Risk** | uploaded pickle/joblib files can execute arbitrary code upon load; only use trusted files | secure ONNX execution |
+| **/docs and /metrics are public** | inspectable portfolio deployment; secrets redacted | private listener or auth |
 
 What the platform is careful about: concept drift is never inferred from
 unlabelled data; the LLM safety screen is heuristic pattern matching, not a

@@ -163,31 +163,39 @@ class PredictionService:
         endpoint = endpoint_for(model.model_name, self.settings)
 
         frame = prepare_inference_frame([features], self._data_config(model))
+        probability = None
         try:
-            probability = float(model.pipeline.predict_proba(frame)[0][1])
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - started) * 1000
-            record_error("prediction_failed", "serving")
-            self.inference_log.record(
-                request_id=request_id,
-                model_name=model.model_name,
-                model_version=model.version,
-                features=features,
-                prediction=None,
-                probability=None,
-                latency_ms=latency_ms,
-                variant=variant,
-                status="error",
-                error_code="prediction_failed",
-                force=True,
-            )
-            raise PredictionError(
-                f"the model could not score this request: {exc}",
-                model=model.model_name,
-                version=model.version,
-            ) from exc
+            from app.training.evaluate import predict_proba as get_probs
+            probability = float(get_probs(model.pipeline, frame)[0])
+            prediction = int(probability >= effective_threshold)
+        except Exception:
+            try:
+                if hasattr(model.pipeline, "predict"):
+                    prediction = int(model.pipeline.predict(frame)[0])
+                else:
+                    raise ValueError("Model has no predict or predict_proba method")
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - started) * 1000
+                record_error("prediction_failed", "serving")
+                self.inference_log.record(
+                    request_id=request_id,
+                    model_name=model.model_name,
+                    model_version=model.version,
+                    features=features,
+                    prediction=None,
+                    probability=None,
+                    latency_ms=latency_ms,
+                    variant=variant,
+                    status="error",
+                    error_code="prediction_failed",
+                    force=True,
+                )
+                raise PredictionError(
+                    f"the model could not score this request: {exc}",
+                    model=model.model_name,
+                    version=model.version,
+                ) from exc
 
-        prediction = int(probability >= effective_threshold)
         latency_ms = (time.perf_counter() - started) * 1000
 
         record_prediction(
@@ -215,8 +223,8 @@ class PredictionService:
             prediction=prediction,
             prediction_label=model.label_for(prediction),
             positive_label=model.label_for(1),
-            probability=round(probability, 6),
-            threshold=round(effective_threshold, 6),
+            probability=round(probability, 6) if probability is not None else None,
+            threshold=round(effective_threshold, 6) if probability is not None else None,
             model_name=model.model_name,
             model_version=model.version,
             model_stage=model.stage,
@@ -243,30 +251,39 @@ class PredictionService:
         deployment_id = self._deployment_id(endpoint_for(model.model_name, self.settings))
 
         frame = prepare_inference_frame(instances, self._data_config(model))
+        probabilities = None
         try:
-            probabilities = model.pipeline.predict_proba(frame)[:, 1]
-        except Exception as exc:
-            record_error("prediction_failed", "serving")
-            raise PredictionError(
-                f"batch scoring failed: {exc}",
-                model=model.model_name,
-                version=model.version,
-                n_instances=len(instances),
-            ) from exc
-
-        predictions = (probabilities >= effective_threshold).astype(int)
+            from app.training.evaluate import predict_proba as get_probs
+            probabilities = get_probs(model.pipeline, frame)
+            predictions = (probabilities >= effective_threshold).astype(int)
+        except Exception:
+            try:
+                if hasattr(model.pipeline, "predict"):
+                    predictions = np.asarray(model.pipeline.predict(frame), dtype=int)
+                else:
+                    raise ValueError("Model has no predict or predict_proba method")
+            except Exception as exc:
+                record_error("prediction_failed", "serving")
+                raise PredictionError(
+                    f"batch scoring failed: {exc}",
+                    model=model.model_name,
+                    version=model.version,
+                    n_instances=len(instances),
+                ) from exc
         latency_ms = (time.perf_counter() - started) * 1000
         per_row_seconds = (latency_ms / max(len(instances), 1)) / 1000.0
 
+        iter_probs = probabilities if probabilities is not None else [None] * len(predictions)
         for index, (probability, prediction) in enumerate(
-            zip(probabilities, predictions, strict=True)
+            zip(iter_probs, predictions, strict=True)
         ):
+            prob_val = float(probability) if probability is not None else None
             record_prediction(
                 model.model_name,
                 model.version,
                 variant,
                 per_row_seconds,
-                probability=float(probability),
+                probability=prob_val,
             )
             self.inference_log.record(
                 request_id=f"{request_id}-{index}",
@@ -274,7 +291,7 @@ class PredictionService:
                 model_version=model.version,
                 features=instances[index],
                 prediction=int(prediction),
-                probability=float(probability),
+                probability=prob_val,
                 latency_ms=per_row_seconds * 1000.0,
                 variant=variant,
                 deployment_id=deployment_id,
@@ -287,8 +304,8 @@ class PredictionService:
             n_instances=len(instances),
             predictions=[int(p) for p in predictions],
             prediction_labels=[model.label_for(int(p)) for p in predictions],
-            probabilities=[round(float(p), 6) for p in probabilities],
-            threshold=round(effective_threshold, 6),
+            probabilities=[round(float(p), 6) for p in probabilities] if probabilities is not None else None,
+            threshold=round(effective_threshold, 6) if probabilities is not None else None,
             inference_latency_ms=round(latency_ms, 3),
         )
 
@@ -311,7 +328,8 @@ class PredictionService:
                 return
             started = time.perf_counter()
             frame = prepare_inference_frame([features], self._data_config(shadow))
-            probability = float(shadow.pipeline.predict_proba(frame)[0][1])
+            from app.training.evaluate import predict_proba as get_probs
+            probability = float(get_probs(shadow.pipeline, frame)[0])
             latency_ms = (time.perf_counter() - started) * 1000
             self.inference_log.record(
                 request_id=request_id,

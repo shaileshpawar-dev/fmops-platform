@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.config import DataConfig
 
@@ -95,6 +95,33 @@ class ModelSignature(BaseModel):
     id_column: str | None = None
     timestamp_column: str | None = None
     features: list[FeatureSpec]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _convert_external_inputs(cls, data: Any) -> Any:
+        """Convert external inputs/outputs signature format to canonical features/target."""
+        if not isinstance(data, dict):
+            return data
+        if "inputs" in data and "features" not in data:
+            data = dict(data)
+            features = []
+            for inp in data.get("inputs", []):
+                if isinstance(inp, dict):
+                    name = inp.get("name")
+                    inp_type = str(inp.get("type", "")).lower()
+                    kind = (
+                        "categorical"
+                        if inp_type in ("string", "str", "bool", "boolean", "category")
+                        else "numeric"
+                    )
+                    dtype = "object" if kind == "categorical" else "float64"
+                    features.append({"name": name, "kind": kind, "dtype": dtype})
+            data["features"] = features
+            if "outputs" in data and "target" not in data:
+                outs = data["outputs"]
+                if isinstance(outs, list) and outs and isinstance(outs[0], dict) and "name" in outs[0]:
+                    data["target"] = outs[0]["name"]
+        return data
 
     # -- views ---------------------------------------------------------------- #
     @property

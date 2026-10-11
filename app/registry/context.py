@@ -14,13 +14,18 @@ deployment of the reference model is unaffected.
 
 from __future__ import annotations
 
+import logging
 import re
+
+from pydantic import ValidationError
 
 from app.core.config import DataConfig, Settings, get_settings
 from app.core.exceptions import FMOpsError
 from app.core.signature import ModelSignature
 from app.registry.base import ModelRegistry
 from app.schemas.model import ModelVersion
+
+logger = logging.getLogger(__name__)
 
 
 class UnservableModelError(FMOpsError):
@@ -70,9 +75,17 @@ def suggest_model_name(target: str, reference: bool, settings: Settings | None =
 
 
 def signature_of(version: ModelVersion) -> ModelSignature | None:
+    """Return the validated canonical ModelSignature, or None if missing or incomplete."""
     if not version.signature:
         return None
-    return ModelSignature.model_validate(version.signature)
+    try:
+        return ModelSignature.model_validate(version.signature)
+    except (ValidationError, ValueError, TypeError) as exc:
+        logger.warning(
+            "registry.signature_invalid",
+            extra={"model": version.name, "version": version.version, "error": str(exc)},
+        )
+        return None
 
 
 def data_config_for(version: ModelVersion, settings: Settings | None = None) -> DataConfig:

@@ -72,22 +72,36 @@ def list_models() -> dict[str, Any]:
     models = []
     for item in registry.list_models():
         name = item["name"]
-        serving = registry.get_serving(name)
-        # A name keeps one target for life, so any version's signature describes
-        # the model -- including one that is not serving yet.
-        described = serving or registry.get_latest(name)
-        signature = signature_of(described) if described else None
-        models.append(
-            {
-                **item,
-                "endpoint": endpoint_for(name),
-                "serving_version": serving.version if serving else None,
-                "serving_stage": serving.stage.value if serving else None,
-                "target": signature.target if signature else None,
-                "positive_label": signature.positive_label if signature else None,
-                "n_features": len(signature.features) if signature else None,
-            }
-        )
+        try:
+            serving = registry.get_serving(name)
+            # A name keeps one target for life, so any version's signature describes
+            # the model -- including one that is not serving yet.
+            described = serving or registry.get_latest(name)
+            signature = signature_of(described) if described else None
+            models.append(
+                {
+                    **item,
+                    "endpoint": endpoint_for(name),
+                    "serving_version": serving.version if serving else None,
+                    "serving_stage": serving.stage.value if serving else None,
+                    "target": signature.target if signature else None,
+                    "positive_label": signature.positive_label if signature else None,
+                    "n_features": len(signature.features) if signature else None,
+                }
+            )
+        except Exception as exc:
+            logger.warning("models.list_entry_failed", extra={"model": name, "error": str(exc)})
+            models.append(
+                {
+                    **item,
+                    "endpoint": endpoint_for(name),
+                    "serving_version": None,
+                    "serving_stage": None,
+                    "target": None,
+                    "positive_label": None,
+                    "n_features": None,
+                }
+            )
     return {"backend": registry.backend, "models": models}
 
 
@@ -509,14 +523,58 @@ async def upload_model(name: str, request: Request) -> ModelVersion:
     except Exception as e:
         raise HTTPException(400, f"Could not deserialize uploaded artifact: {e}")
 
+    import json
+    params = {}
+    metrics_str = request.headers.get("X-Model-Metrics")
+    if metrics_str:
+        try:
+            params["client_metrics"] = json.loads(metrics_str)
+        except Exception:
+            raise HTTPException(400, "Invalid JSON in X-Model-Metrics header")
+
+    signature = None
+    sig_str = request.headers.get("X-Model-Signature")
+    if sig_str:
+        try:
+            signature_json = json.loads(sig_str)
+            if not isinstance(signature_json, dict):
+                raise ValueError("Signature must be a JSON object")
+            signature = dict(signature_json)
+            if "inputs" in signature and "features" not in signature:
+                features = []
+                for inp in signature.get("inputs", []):
+                    feat_name = inp.get("name")
+                    inp_type = str(inp.get("type", "")).lower()
+                    kind = (
+                        "categorical"
+                        if inp_type in ("string", "str", "bool", "boolean", "category")
+                        else "numeric"
+                    )
+                    dtype = "object" if kind == "categorical" else "float64"
+                    features.append({
+                        "name": feat_name,
+                        "kind": kind,
+                        "dtype": dtype,
+                    })
+                signature["features"] = features
+            if "outputs" in signature and "target" not in signature:
+                outs = signature.get("outputs")
+                if isinstance(outs, list) and outs and isinstance(outs[0], dict) and "name" in outs[0]:
+                    signature["target"] = outs[0]["name"]
+        except Exception:
+            raise HTTPException(400, "Invalid JSON in X-Model-Signature header")
+
     # Register
     actor = request_actor(request)
     version = get_registry().register(
         name=name,
-        artifact_uri=f"file://{temp_path.absolute().as_posix()}",
+        artifact_uri=temp_path.absolute().as_uri(),
         algorithm="uploaded",
         description=f"Uploaded by {actor}",
-        created_by=actor
+        created_by=actor,
+        metrics=None,
+        params=params,
+        signature=signature
     )
     return version
 

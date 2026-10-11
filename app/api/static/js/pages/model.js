@@ -623,7 +623,13 @@ function wireModelActions(){
         
         <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Artifact File</label>
         <input type="file" id="up_file" accept=".pkl,.joblib" style="margin-bottom:12px">
-        
+
+        <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Evaluation Metrics (JSON)</label>
+        <textarea id="up_metrics" style="width:100%;height:40px;margin-bottom:12px;font-family:monospace;font-size:11px" placeholder="{}">{"f1": 0.8, "roc_auc": 0.85, "precision": 0.8, "recall": 0.8}</textarea>
+
+        <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Input Signature (JSON)</label>
+        <textarea id="up_sig" style="width:100%;height:40px;margin-bottom:12px;font-family:monospace;font-size:11px" placeholder="{}">{"inputs": [{"name": "f1", "type": "double"}, {"name": "f2", "type": "double"}, {"name": "f3", "type": "double"}]}</textarea>
+
         <div id="up_err" style="color:var(--bad);font-size:12.5px;margin-bottom:12px;display:none"></div>
 
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
@@ -648,6 +654,8 @@ function wireModelActions(){
       if(ext !== "pkl" && ext !== "joblib"){ err.textContent = "Only .pkl and .joblib are supported."; err.style.display="block"; return; }
       
       const btn = $("#up_yes", m);
+      const metricsVal = $("#up_metrics", m).value;
+      const sigVal = $("#up_sig", m).value;
       btn.disabled = true;
       btn.textContent = "Uploading...";
       err.style.display = "none";
@@ -659,7 +667,9 @@ function wireModelActions(){
           headers: { 
             "Accept": "application/json",
             "Content-Type": "application/octet-stream",
-            "X-File-Name": file.name 
+            "X-File-Name": file.name,
+            "X-Model-Metrics": metricsVal,
+            "X-Model-Signature": sigVal
           }
         });
         const text = await res.text();

@@ -150,39 +150,63 @@ def _models_section() -> dict[str, Any]:
     out = []
     for item in registry.list_models():
         name = item["name"]
-        serving = registry.get_serving(name)
-        deployment = manager.status(endpoint_for(name))
-        described = serving or registry.get_latest(name)
-        signature = signature_of(described) if described else None
-        drift = db.query_one(
-            "SELECT drift_detected, created_at FROM drift_reports WHERE model_name = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            (name,),
-        )
-        pending = int(
-            db.scalar(
-                "SELECT COUNT(*) FROM model_versions WHERE name = ? AND status = 'pending'",
+        try:
+            serving = registry.get_serving(name)
+            deployment = manager.status(endpoint_for(name))
+            described = serving or registry.get_latest(name)
+            signature = signature_of(described) if described else None
+            drift = db.query_one(
+                "SELECT drift_detected, created_at FROM drift_reports WHERE model_name = ? "
+                "ORDER BY created_at DESC LIMIT 1",
                 (name,),
-                0,
             )
-        )
-        out.append(
-            {
-                "name": name,
-                "versions": item.get("versions"),
-                "endpoint": endpoint_for(name),
-                "serving_version": serving.version if serving else None,
-                "serving_stage": serving.stage.value if serving else None,
-                "roc_auc": float(serving.metrics.get("roc_auc", 0.0)) if serving else None,
-                "target": signature.target if signature else None,
-                "deployment_state": deployment.state.value if deployment else None,
-                "live_version": deployment.current_version if deployment else None,
-                "last_drift_detected": bool(drift["drift_detected"]) if drift else None,
-                "last_drift_at": drift["created_at"] if drift else None,
-                "awaiting_approval": pending,
-                "updated_at": item.get("updated_at"),
-            }
-        )
+            pending = int(
+                db.scalar(
+                    "SELECT COUNT(*) FROM model_versions WHERE name = ? AND status = 'pending'",
+                    (name,),
+                    0,
+                )
+            )
+            out.append(
+                {
+                    "name": name,
+                    "versions": item.get("versions"),
+                    "endpoint": endpoint_for(name),
+                    "serving_version": serving.version if serving else None,
+                    "serving_stage": serving.stage.value if serving else None,
+                    "roc_auc": float(serving.metrics.get("roc_auc", 0.0)) if serving else None,
+                    "target": signature.target if signature else None,
+                    "deployment_state": deployment.state.value if deployment else None,
+                    "live_version": deployment.current_version if deployment else None,
+                    "last_drift_detected": bool(drift["drift_detected"]) if drift else None,
+                    "last_drift_at": drift["created_at"] if drift else None,
+                    "awaiting_approval": pending,
+                    "updated_at": item.get("updated_at"),
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "dashboard.model_entry_failed",
+                extra={"model": name, "error": str(exc)},
+            )
+            out.append(
+                {
+                    "name": name,
+                    "versions": item.get("versions"),
+                    "endpoint": endpoint_for(name),
+                    "serving_version": None,
+                    "serving_stage": None,
+                    "roc_auc": None,
+                    "target": None,
+                    "deployment_state": None,
+                    "live_version": None,
+                    "last_drift_detected": None,
+                    "last_drift_at": None,
+                    "awaiting_approval": 0,
+                    "updated_at": item.get("updated_at"),
+                    "error": str(exc),
+                }
+            )
     return {"available": True, "models": out}
 
 

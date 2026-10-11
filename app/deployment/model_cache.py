@@ -148,7 +148,12 @@ class ModelCache:
         # The sidecar travels with the artifact and is authoritative; the
         # registry copy covers artifacts whose sidecar was not fetched.
         raw_signature = metadata.get("signature") or model_version.signature
-        signature = ModelSignature.model_validate(raw_signature) if raw_signature else None
+        signature = None
+        if raw_signature:
+            try:
+                signature = ModelSignature.model_validate(raw_signature)
+            except Exception:
+                signature = None
         from app.registry.context import data_config_for
 
         data_config = (

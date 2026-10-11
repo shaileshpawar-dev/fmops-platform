@@ -41,14 +41,21 @@ function featureInput(f, value){
 function renderPrediction(p){
   const pos = p.positive_label || "positive";
   const isPos = p.prediction === 1;
-  return card("Prediction", `
-    <div class="predout ${isPos ? "pos" : "neg"}">
-      <div class="lbl"><span class="eyebrow">Predicted</span><b>${esc(p.prediction_label)}</b></div>
+  const probBlock = p.probability !== null && p.probability !== undefined ? `
       <div class="prob"><span class="eyebrow">P(${esc(pos)})</span><b class="mono">${num(p.probability, 4)}</b>
         <div class="bar" role="img" aria-label="probability ${esc(Number(p.probability).toFixed(4))} against threshold ${esc(Number(p.threshold).toFixed(3))}">
           <i style="width:${Math.max(0, Math.min(100, p.probability * 100)).toFixed(1)}%"></i>
           <u style="left:${Math.max(0, Math.min(100, p.threshold * 100)).toFixed(1)}%"></u></div>
         <span class="hint">decision threshold ${num(p.threshold, 3)} — the version's own operating point</span></div>
+  ` : `
+      <div class="prob"><span class="eyebrow">P(${esc(pos)})</span><b class="mono mute">N/A</b>
+        <span class="hint">Discrete prediction only. Probability unavailable.</span></div>
+  `;
+
+  return card("Prediction", `
+    <div class="predout ${isPos ? "pos" : "neg"}">
+      <div class="lbl"><span class="eyebrow">Predicted</span><b>${esc(p.prediction_label)}</b></div>
+      ${probBlock}
     </div>
     <div class="grid g4" style="margin-top:14px">
       ${kpi("Version", `<a class="mono" href="#/models/${encodeURIComponent(p.model_name)}/${p.model_version}">v${int(p.model_version)}</a>`, esc(p.model_stage || ""))}
@@ -121,7 +128,7 @@ PAGES.predict = {
         { label:"Variant", render:x => badge(x.variant || "primary", "mute") },
         { label:"Prediction", render:x => x.status === "ok"
             ? esc(x.prediction === 1 ? labels[1] : labels[0]) : runStatusBadge(x.status) },
-        { label:"P(positive)", num:true, render:x => num(x.probability, 4) },
+        { label:"P(positive)", num:true, render:x => x.probability !== null && x.probability !== undefined ? num(x.probability, 4) : '<span class="mute">N/A</span>' },
         { label:"Latency", num:true, render:x => ms(x.latency_ms) },
         { label:"Request", render:x => copyable(x.request_id, String(x.request_id).slice(0, 10) + "…", { label:"request id" }) },
       ], recent, { empty:"No predictions for this model yet." }), { flush:true, sub:"from the inference log" });

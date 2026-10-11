@@ -105,8 +105,8 @@ class PredictionResponse(BaseModel):
     positive_label: str = Field(
         default="", description="What `probability` is the probability of."
     )
-    probability: float
-    threshold: float
+    probability: float | None = None
+    threshold: float | None = None
     model_name: str
     model_version: int
     model_stage: str
@@ -128,8 +128,8 @@ class BatchPredictionResponse(BaseModel):
     n_instances: int
     predictions: list[int]
     prediction_labels: list[str] = Field(default_factory=list)
-    probabilities: list[float]
-    threshold: float
+    probabilities: list[float] | None = None
+    threshold: float | None = None
     inference_latency_ms: float
     created_at: str = Field(default_factory=utcnow_iso)
 
