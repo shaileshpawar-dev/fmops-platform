@@ -490,12 +490,31 @@ function automlBody(run, live){
 
   if(live) return progress;
 
-  if(run.status === "failed") return progress + card("Run failed", `
-    <div class="verdict fail"><span class="mark" aria-hidden="true">&times;</span>
-      <span class="txt"><b>NO MODEL WAS PRODUCED</b>
-        <span>The error below is what the backend recorded.</span></span></div>
-    <pre class="scroll" style="margin:0">${esc(run.error || "no error recorded")}</pre>`,
-    {});
+  if(run.status === "failed"){
+    const failedCands = (run.candidates || []).filter(c => c.status === "failed");
+    const candErrors = failedCands.length ? `
+      <div style="margin-top:14px">
+        <b style="font-size:13px;display:block;margin-bottom:8px">Candidate Error Details:</b>
+        <div style="display:grid;gap:8px">
+          ${failedCands.map(c => `
+            <div style="padding:10px 12px;background:var(--card-hover, rgba(0,0,0,0.03));border:1px solid var(--line);border-radius:4px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <span class="mono" style="font-weight:600">${esc(c.algorithm)}</span>
+                ${runStatusBadge(c.status)}
+              </div>
+              <div style="font-size:12.5px;color:var(--bad);word-break:break-word">${esc(c.error || "no error recorded")}</div>
+            </div>`).join("")}
+        </div>
+      </div>` : "";
+
+    return progress + card("Run failed", `
+      <div class="verdict fail"><span class="mark" aria-hidden="true">&times;</span>
+        <span class="txt"><b>NO MODEL WAS PRODUCED</b>
+          <span>The error below is what the backend recorded.</span></span></div>
+      <pre class="scroll" style="margin:0">${esc(run.error || "no error recorded")}</pre>
+      ${candErrors}`,
+      {});
+  }
 
   const board = run.leaderboard || [];
   const metric = run.primary_metric || "roc_auc";

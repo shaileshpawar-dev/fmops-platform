@@ -334,3 +334,27 @@ def test_run_settings_do_not_mutate_the_global_configuration(settings):
     contract_for_target(_binary_frame(200), "churn", settings=settings)
     assert settings.data.target_column == before
     assert settings.data.feature_columns == before_features
+
+
+def test_all_candidates_failed_error_summarization(settings):
+    """When all candidates fail, the run error must summarize the actual candidate errors."""
+    from app.automl.runner import Candidate
+
+    candidates = [
+        Candidate("logistic_regression", status="failed", error="data validation failed: duplicate_row_fraction_below_limit"),
+        Candidate("random_forest", status="failed", error="data validation failed: duplicate_row_fraction_below_limit"),
+        Candidate("hist_gradient_boosting", status="failed", error="data validation failed: duplicate_row_fraction_below_limit"),
+    ]
+    unique_errors = []
+    for c in candidates:
+        err = (c.error or "").strip()
+        if err and err not in unique_errors:
+            unique_errors.append(err)
+    run_err = "every candidate failed to train"
+    if unique_errors:
+        run_err += f": {'; '.join(unique_errors[:3])}"
+    else:
+        run_err += "; see the individual errors"
+
+    assert "duplicate_row_fraction_below_limit" in run_err
+    assert len(unique_errors) == 1

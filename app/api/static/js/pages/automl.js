@@ -230,7 +230,7 @@ function renderAutoMLRun(run){
 
   const failures = failed.length ? card("Failed candidates", table([
     { label:"Model", render:c => `<span class="mono">${esc(c.algorithm)}</span>` },
-    { label:"Error", render:c => `<span class="dim">${esc(String(c.error||"").slice(0,180))}</span>` },
+    { label:"Error", render:c => `<span class="dim" style="word-break:break-word">${esc(String(c.error||""))}</span>` },
   ], failed, { empty:"" }), { flush:true,
     sub:"a failed candidate never enters the ranking" }) : "";
 

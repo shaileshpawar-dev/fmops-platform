@@ -344,10 +344,21 @@ def execute_automl_run(run_id: str, checkpoint: Any = None) -> str:
         store.update(run_id, candidates=[c.to_dict() for c in candidates])
 
         if not ranked:
+            unique_errors = []
+            for c in candidates:
+                err = (c.error or "").strip()
+                if err and err not in unique_errors:
+                    unique_errors.append(err)
+            run_err = "every candidate failed to train"
+            if unique_errors:
+                run_err += f": {'; '.join(unique_errors[:3])}"
+            else:
+                run_err += "; see the individual errors"
+
             store.update(
                 run_id,
                 status=FAILED,
-                error="every candidate failed to train; see the individual errors",
+                error=run_err[:500],
                 completed_at=_now(),
                 duration_seconds=round(time.perf_counter() - started, 2),
             )
