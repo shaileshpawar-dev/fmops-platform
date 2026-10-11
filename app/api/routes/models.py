@@ -509,11 +509,20 @@ async def upload_model(name: str, request: Request) -> ModelVersion:
             request.headers.get("X-Upload-Token")
             or request.headers.get("Authorization", "")
         ).replace("Bearer ", "").strip()
-        if not (token and auth_header and secrets.compare_digest(auth_header, token)):
+        authorized = False
+        if token and auth_header:
+            try:
+                authorized = secrets.compare_digest(
+                    auth_header.encode("utf-8"),
+                    token.encode("utf-8"),
+                )
+            except Exception:
+                authorized = False
+        if not authorized:
             raise HTTPException(
                 403,
                 "Pretrained model upload is disabled in production for deserialization safety. "
-                "Enable it with FMOPS_SECURITY__ALLOW_MODEL_UPLOAD=true or provide a valid X-Upload-Token header."
+                "Enable it with FMOPS_SECURITY__ALLOW_MODEL_UPLOAD=true or provide a valid X-Upload-Token header.",
             )
 
     try:

@@ -633,6 +633,9 @@ function wireModelActions(){
         <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Input Signature (JSON)</label>
         <textarea id="up_sig" style="width:100%;height:40px;margin-bottom:12px;font-family:monospace;font-size:11px" placeholder="{}">{"inputs": [{"name": "f1", "type": "double"}, {"name": "f2", "type": "double"}, {"name": "f3", "type": "double"}]}</textarea>
 
+        <label style="font-size:11.5px;color:var(--ink-3);display:block;margin-bottom:4px">Authorization Token (optional; required in production unless public upload is enabled)</label>
+        <input type="password" id="up_token" placeholder="Optional authorization / demo token" autocomplete="off" style="margin-bottom:12px;width:100%">
+
         <div id="up_err" style="color:var(--bad);font-size:12.5px;margin-bottom:12px;display:none"></div>
 
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
@@ -656,24 +659,58 @@ function wireModelActions(){
       const ext = file.name.split(".").pop().toLowerCase();
       if(ext !== "pkl" && ext !== "joblib"){ err.textContent = "Only .pkl and .joblib are supported."; err.style.display="block"; return; }
       
+      const rawMetrics = $("#up_metrics", m).value.trim();
+      const rawSig = $("#up_sig", m).value.trim();
+      const tokenVal = ($("#up_token", m) && $("#up_token", m).value.trim()) || "";
+
+      let compactMetrics = "";
+      if(rawMetrics){
+        try {
+          const parsed = JSON.parse(rawMetrics);
+          compactMetrics = JSON.stringify(parsed);
+        } catch(jsonErr){
+          err.textContent = "Evaluation Metrics must be valid JSON: " + jsonErr.message;
+          err.style.display = "block";
+          return;
+        }
+      }
+
+      let compactSig = "";
+      if(rawSig){
+        try {
+          const parsed = JSON.parse(rawSig);
+          compactSig = JSON.stringify(parsed);
+        } catch(jsonErr){
+          err.textContent = "Input Signature must be valid JSON: " + jsonErr.message;
+          err.style.display = "block";
+          return;
+        }
+      }
+
       const btn = $("#up_yes", m);
-      const metricsVal = $("#up_metrics", m).value;
-      const sigVal = $("#up_sig", m).value;
       btn.disabled = true;
       btn.textContent = "Uploading...";
       err.style.display = "none";
-      
+
       try {
+        const reqHeaders = {
+          "Accept": "application/json",
+          "Content-Type": "application/octet-stream",
+          "X-File-Name": file.name
+        };
+        if(compactMetrics){
+          reqHeaders["X-Model-Metrics"] = compactMetrics;
+        }
+        if(compactSig){
+          reqHeaders["X-Model-Signature"] = compactSig;
+        }
+        if(tokenVal){
+          reqHeaders["X-Upload-Token"] = tokenVal;
+        }
         const res = await fetch(`/api/v1/models/${encodeURIComponent(name)}/upload`, {
           method: "POST",
           body: file,
-          headers: { 
-            "Accept": "application/json",
-            "Content-Type": "application/octet-stream",
-            "X-File-Name": file.name,
-            "X-Model-Metrics": metricsVal,
-            "X-Model-Signature": sigVal
-          }
+          headers: reqHeaders
         });
         const text = await res.text();
         let body = null; try { body = text ? JSON.parse(text) : null; } catch(e){ body = text; }

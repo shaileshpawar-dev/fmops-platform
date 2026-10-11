@@ -518,6 +518,8 @@ class Settings(BaseSettings):
                 data[key] = "***redacted***"
         if data.get("alerts", {}).get("webhook_url"):
             data["alerts"]["webhook_url"] = "***redacted***"
+        if data.get("security", {}).get("model_upload_token"):
+            data["security"]["model_upload_token"] = "***redacted***"
         return data
 
 
